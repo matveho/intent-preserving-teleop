@@ -12,6 +12,7 @@ from pathlib import Path
 import crtk
 import sensable_phantom
 import mujoco
+import mujoco.viewer
 
 # ===================== Module ====================== #
 class example:
