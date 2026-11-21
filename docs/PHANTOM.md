@@ -22,10 +22,11 @@ The intended end result is:
 - [8. Install ROS Dependencies & Build](#8-install-ros-dependencies-and-build)
 - [9. Test the Standalone Qt Application](#9-test-the-standalone-qt-application)
 - [10. Run the ROS 2 Node](#10-run-the-ros-2-node)
-- [11. Inspect the published topics](#11-inspect-the-published-topics)
-- [12. Access the device from Python](#12-access-the-device-from-python)
-- [13. Troubleshooting](#13-troubleshooting)
-- [14. References](#14-references)
+- [11. Inspect the Published Topics](#11-inspect-the-published-topics)
+- [12. Access the Device from Python](#12-access-the-device-from-python)
+- [13. Quick Setup Guide](#13-quick-setup-guide)
+- [14. Troubleshooting](#13-troubleshooting)
+- [15. References](#14-references)
 
 ---
 
@@ -538,7 +539,124 @@ Useful upstream example:
 
 [`xyz-motions.py`](https://github.com/jhu-saw/sawSensablePhantom/blob/main/ros/scripts/xyz-motions.py)
 
-## 13. Troubleshooting
+## 13. Quick Setup Guide
+Assuming steps 1-6 are complete.
+
+### 13.1. Navigate to the workspace
+
+```bash
+cd ~/phantom_ws
+```
+
+Expected structure:
+
+```text
+phantom_ws/
+├── src/                    # ROS 2 dependencies and SAW repositories
+├── .venv/                  # Python virtual environment
+├── build/
+├── requirements.txt
+├── install/
+└── log/
+...
+```
+
+### 13.2. Set up the Python virtual environment
+
+Source ROS 2 first:
+
+```bash
+source /opt/ros/humble/setup.bash
+```
+
+Create the virtual environment if it doesn't already exist:
+
+```bash
+python3 -m venv --system-site-packages .venv
+```
+
+**Note:** `--system-site-packages` allows the virtual environment to access ROS 2's installed Python modules, including packages such as `rclpy`.
+
+Activate it:
+
+```bash
+source .venv/bin/activate
+```
+
+Upgrade pip:
+
+```bash
+python -m pip install --upgrade pip
+```
+
+### 13.3. Install Python dependencies
+```bash
+python -m pip install -r phantom_mujoco/requirements.txt
+```
+
+### 13.4. Install ROS dependencies
+
+Make sure ROS 2 and the virtual environment are active:
+
+```bash
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+```
+
+Update rosdep and install dependencies for the workspace:
+
+```bash
+sudo rosdep init  # Only needed once per machine
+rosdep update
+
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+### 13.5. Build the workspace
+
+From the workspace root:
+
+```bash
+colcon build --symlink-install
+```
+
+Source the resulting workspace:
+
+```bash
+source install/setup.bash
+```
+
+### 13.6. Run the PHANToM interface
+
+With the environment sourced, start the PHANToM ROS 2 node:
+
+```bash
+ros2 run sensable_phantom sensable_phantom -D
+```
+
+Alternatively, specify a configuration file:
+
+```bash
+ros2 run sensable_phantom sensable_phantom -j /absolute/path/to/sawSensablePhantom.json
+```
+
+Keep this terminal running.
+
+### 13.7. Run your Python implementation
+
+Open a second terminal:
+
+```bash
+cd ~/phantom_ws
+
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+source install/setup.bash
+
+python /absolute/path/to/main.py
+```
+
+## 14. Troubleshooting
 
 ### No `/dev/fw*` device appears
 
@@ -598,7 +716,7 @@ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 ---
 
-## 14. References
+## 15. References
 
 - [sawSensablePhantom repository](https://github.com/jhu-saw/sawSensablePhantom)
 - [sawSensablePhantom driver instructions](https://github.com/jhu-saw/sawSensablePhantom/blob/main/drivers.md)

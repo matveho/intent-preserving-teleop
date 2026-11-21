@@ -1,1 +1,3 @@
 # add project dependencies here.
+numpy
+scipy
