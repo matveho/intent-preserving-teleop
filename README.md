@@ -34,6 +34,7 @@ The system will require:
 - bounded Cartesian motion
 - state-action demonstration logging
 
+
 Human and policy commands will be combined through state-dependent arbitration:
 
 [
