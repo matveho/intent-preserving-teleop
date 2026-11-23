@@ -23,7 +23,7 @@
   - realistic joint/workspace limits, bounded Cartesian velocity and acceleration, configurable latency and command filtering.
   - Run the controller at the intended external control frequency rather than MuJoCo's physics timestep, matching the physical Gen3's limits and timing.
   - **Handoff to Graeme.**
-- [ ]  **Validate insertion contact behaviour** `M` — **Nov 25 [Tuesday]**:
+- [ ]  **Validate insertion contact behaviour** `M` — **Nov 25 [Wednesday]**:
 
   - test aligned insertion, edge contact, lateral offset, jamming, and successful insertion.
   - Fix stable contact parameters so identical initial states produce repeatable outcomes; begin with forgiving clearance and reduce it only after repeatable behaviour is established.
