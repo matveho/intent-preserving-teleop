@@ -1,0 +1,170 @@
+diff --git a/core/components/CMakeLists.txt b/core/components/CMakeLists.txt
+index 7332c44..afb85af 100644
+--- a/core/components/CMakeLists.txt
++++ b/core/components/CMakeLists.txt
+@@ -19,9 +19,9 @@ set (REQUIRED_CISST_LIBRARIES
+      cisstMultiTask
+      cisstParameterTypes)
+ 
+-find_package (cisst 1.2.1 REQUIRED ${REQUIRED_CISST_LIBRARIES})
++find_package (cisst 1.2.1 REQUIRED COMPONENTS ${REQUIRED_CISST_LIBRARIES})
+ 
+-if (cisst_FOUND_AS_REQUIRED)
++if (cisst_FOUND)
+ 
+   # load cisst configuration
+   include (${CISST_USE_FILE})
+@@ -43,7 +43,7 @@ if (cisst_FOUND_AS_REQUIRED)
+                NAMES "HD/hd.h")
+     if (EXISTS "${SENSABLE_INCLUDE_DIR}/HD/hd.h")
+       set (SENSABLE_FOUND 1)
+-      set (SENSABLE_LIBRARIES HD)
++      find_library (SENSABLE_LIBRARIES NAMES HD PATHS /usr/lib64 REQUIRED)
+     endif ()
+   endif ()
+ 
+@@ -92,7 +92,7 @@ if (cisst_FOUND_AS_REQUIRED)
+                            VERSION ${sawSensablePhantom_VERSION}
+                            FOLDER "sawSensablePhantom")
+     target_link_libraries (sawSensablePhantom ${SENSABLE_LIBRARIES} ${sawControllers_LIBRARIES})
+-    cisst_target_link_libraries (sawSensablePhantom ${REQUIRED_CISST_LIBRARIES})
++    target_link_libraries (sawSensablePhantom ${REQUIRED_CISST_LIBRARIES})
+ 
+     # Install target for headers and library
+     install (DIRECTORY
+@@ -109,6 +109,6 @@ if (cisst_FOUND_AS_REQUIRED)
+     message ("Information: code in ${CMAKE_CURRENT_SOURCE_DIR} requires Sensable.")
+   endif ()
+ 
+-else (cisst_FOUND_AS_REQUIRED)
++else (cisst_FOUND)
+   message ("Information: code in ${CMAKE_CURRENT_SOURCE_DIR} will not be compiled, it requires ${REQUIRED_CISST_LIBRARIES}")
+-endif (cisst_FOUND_AS_REQUIRED)
++endif (cisst_FOUND)
+diff --git a/core/components/code/Qt/CMakeLists.txt b/core/components/code/Qt/CMakeLists.txt
+index 019dbaa..b685ca1 100644
+--- a/core/components/code/Qt/CMakeLists.txt
++++ b/core/components/code/Qt/CMakeLists.txt
+@@ -18,12 +18,12 @@ set (REQUIRED_CISST_LIBRARIES
+      cisstMultiTaskQt
+      cisstParameterTypes
+      cisstParameterTypesQt
+-     cisstQt)
++     cisstCommonQt)
+ 
+ # cisst
+-find_package (cisst REQUIRED ${REQUIRED_CISST_LIBRARIES})
++find_package (cisst REQUIRED COMPONENTS ${REQUIRED_CISST_LIBRARIES})
+ 
+-if (cisst_FOUND_AS_REQUIRED)
++if (cisst_FOUND)
+ 
+   # cisst
+   include (${CISST_USE_FILE})
+@@ -44,7 +44,7 @@ if (cisst_FOUND_AS_REQUIRED)
+   set_target_properties (sawSensablePhantomQt PROPERTIES
+     VERSION ${sawSensablePhantom_VERSION}
+     FOLDER "sawSensablePhantom")
+-  cisst_target_link_libraries (sawSensablePhantomQt ${REQUIRED_CISST_LIBRARIES})
++  target_link_libraries (sawSensablePhantomQt ${REQUIRED_CISST_LIBRARIES})
+ 
+ 
+   install (TARGETS sawSensablePhantomQt COMPONENT sawSensablePhantom-Qt
+@@ -52,6 +52,6 @@ if (cisst_FOUND_AS_REQUIRED)
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib)
+ 
+-else (cisst_FOUND_AS_REQUIRED)
++else (cisst_FOUND)
+   message ("Information: code will not be compiled, it requires ${REQUIRED_CISST_LIBRARIES}")
+-endif (cisst_FOUND_AS_REQUIRED)
++endif (cisst_FOUND)
+diff --git a/core/examples/CMakeLists.txt b/core/examples/CMakeLists.txt
+index ed05c4e..5b04ce1 100644
+--- a/core/examples/CMakeLists.txt
++++ b/core/examples/CMakeLists.txt
+@@ -23,9 +23,9 @@ set (REQUIRED_CISST_LIBRARIES cisstCommon
+                               cisstParameterTypes)
+ 
+ # find cisst and make sure the required libraries have been compiled
+-find_package (cisst 1.2.0 REQUIRED ${REQUIRED_CISST_LIBRARIES})
++find_package (cisst 1.2.0 REQUIRED COMPONENTS ${REQUIRED_CISST_LIBRARIES})
+ 
+-if (cisst_FOUND_AS_REQUIRED)
++if (cisst_FOUND)
+ 
+   # load cisst configuration
+   include (${CISST_USE_FILE})
+@@ -43,7 +43,7 @@ if (cisst_FOUND_AS_REQUIRED)
+     include_directories (${sawSensablePhantom_INCLUDE_DIR})
+     link_directories (
+       ${sawSensablePhantom_LIBRARY_DIR}
+-      ${sawController_LIBRARY_DIR})
++      ${sawControllers_LIBRARY_DIR})
+ 
+     add_executable (sawSensablePhantomQtExample main.cpp)
+     set_target_properties (sawSensablePhantomQtExample PROPERTIES
+@@ -58,7 +58,7 @@ if (cisst_FOUND_AS_REQUIRED)
+                            )
+ 
+     # link against cisst libraries (and dependencies)
+-    cisst_target_link_libraries (sawSensablePhantomQtExample ${REQUIRED_CISST_LIBRARIES})
++    target_link_libraries (sawSensablePhantomQtExample ${REQUIRED_CISST_LIBRARIES})
+ 
+     install (TARGETS sawSensablePhantomQtExample COMPONENT sawSensablePhantom-Examples
+              RUNTIME DESTINATION bin
+@@ -69,4 +69,4 @@ if (cisst_FOUND_AS_REQUIRED)
+     message ("Information: code in ${CMAKE_CURRENT_SOURCE_DIR} will not be compiled, it requires sawSensablePhantom and cisstQt")
+   endif ()
+ 
+-endif (cisst_FOUND_AS_REQUIRED)
++endif (cisst_FOUND)
+diff --git a/models/package.xml b/models/package.xml
+index ab3f462..87dce3a 100644
+--- a/models/package.xml
++++ b/models/package.xml
+@@ -12,7 +12,8 @@
+ 
+   <exec_depend>joint_state_publisher</exec_depend>
+   <exec_depend>robot_state_publisher</exec_depend>
+-  <exec_depend>rviz</exec_depend>
++  <exec_depend condition="$ROS_VERSION == 1">rviz</exec_depend>
++  <exec_depend condition="$ROS_VERSION == 2">rviz2</exec_depend>
+ 
+   <!-- The export tag contains other, unspecified, tags -->
+   <export>
+diff --git a/ros/CMakeLists.txt b/ros/CMakeLists.txt
+index cb3c3c3..94340e7 100644
+--- a/ros/CMakeLists.txt
++++ b/ros/CMakeLists.txt
+@@ -49,12 +49,11 @@ set (REQUIRED_CISST_LIBRARIES
+   cisstMultiTask
+   cisstMultiTaskQt
+   cisstParameterTypes
+-  cisstParameterTypesQt
+-  cisstQt)
++  cisstParameterTypesQt)
+ 
+-find_package (cisst 1.2.1 REQUIRED ${REQUIRED_CISST_LIBRARIES})
++find_package (cisst 1.2.1 REQUIRED COMPONENTS ${REQUIRED_CISST_LIBRARIES})
+ 
+-if (cisst_FOUND_AS_REQUIRED)
++if (cisst_FOUND)
+ 
+   # load cisst configuration
+   include (${CISST_USE_FILE})
+@@ -86,7 +85,7 @@ if (cisst_FOUND_AS_REQUIRED)
+       ${catkin_LIBRARIES})
+ 
+     # link against cisst libraries (and dependencies)
+-    cisst_target_link_libraries (sensable_phantom ${REQUIRED_CISST_LIBRARIES})
++    target_link_libraries (sensable_phantom ${REQUIRED_CISST_LIBRARIES})
+ 
+     install (TARGETS sensable_phantom
+       LIBRARY DESTINATION lib/${PROJECT_NAME}
+@@ -116,4 +115,4 @@ if (cisst_FOUND_AS_REQUIRED)
+     message ("Information: code in ${CMAKE_CURRENT_SOURCE_DIR} will not be compiled, it requires sawSensablePhantom")
+   endif (sawSensablePhantom_FOUND)
+ 
+-endif (cisst_FOUND_AS_REQUIRED)
++endif (cisst_FOUND)

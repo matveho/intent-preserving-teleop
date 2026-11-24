@@ -10,25 +10,30 @@ Key design points
      using ``jnt_qposadr``, ``jnt_dofadr``, and actuator ``trnid`` rather than
      hardcoded ``[:7]`` slices.
    - Excludes ``base_link``/``shoulder_link`` and ``peg_body``/wrist-link
-     self-contacts, and mounts ``peg_body`` at the actual flange/tool site
-     (auto-detected from ``gen3.xml``) so the peg never clips into the wrist.
+     self-contacts.
    - Applies ``armature >= 0.1`` and ``damping >= 1.0`` and sets explicit
      ``ctrlrange`` bounds on continuous joints (``joint_1``, ``joint_3``,
      ``joint_5``, ``joint_7``).
-2. **6-DoF Cartesian -> 7-DoF Kinova Gen3 Control**:
-   - Maps bounded 6-DoF Cartesian twists or pose increments to 7-DoF joint
-     targets using Damped Least-Squares (DLS) Jacobian IK with nullspace
-     posture regularization toward ``DEFAULT_HOME_QPOS``.
-   - Runs at the external control rate (default 50 Hz) while stepping MuJoCo
-     physics at 500 Hz (0.002 s), with velocity/acceleration/workspace limits,
-     command latency queue, and optional low-pass filtering.
-3. **Contact-Rich Peg-in-Hole & Domain Randomization**:
-   - Peg rigidly attached to the Gen3 tool flange + wrist-mounted camera
-     (``wrist_cam``) with per-episode lighting randomization.
-   - Octagonal primitive-box hole assembly with configurable clearance.
-   - Deterministic ``reset(seed=...)``, randomized hole pose/friction/lighting,
-     optional Kinova-like encoder quantization, and automated success/failure
-     detection.
+2. **Peg mounted on the rotating end link (joint_7)**:
+   - ``peg_body`` is a child of the body that owns ``joint_7`` (the bracelet),
+     so every one of the 7 joints moves the peg. The peg axis is built
+     explicitly (outward along the flange axis) and verified at model build
+     time; a RuntimeError is raised if it is parented wrongly or points back
+     into the wrist.
+3. **6-DoF Cartesian -> 7-DoF Kinova Gen3 Control**:
+   - Damped Least-Squares (DLS) Jacobian IK with nullspace posture
+     regularization toward ``DEFAULT_HOME_QPOS`` (this is where the 7th DoF
+     is used).
+   - Runs at the external control rate while stepping MuJoCo physics at 500 Hz.
+4. **Single hole by default, optional second hole**:
+   - Default: one vertical hole in the table (``"top"``); no extra geometry.
+   - ``enable_second_hole=True`` adds a second target, ``second_hole_layout``:
+     ``"table"`` (same orientation, 15 cm to the right; decoy for
+     shared-autonomy demos) or ``"wall"`` (horizontal hole in a vertical wall,
+     perpendicular to the top hole).
+   - Select with ``reset(hole="top" | "side" | "random")``.
+5. **Domain Randomization**: hole pose/friction/lighting/clearance, latency,
+   optional encoder quantization, automated success/failure detection.
 """
 
 from __future__ import annotations
@@ -85,6 +90,32 @@ KINOVA_JOINT_LIMITS = np.array(
     dtype=np.float64,
 )
 
+# Nominal hole placements. Each hole's local +Z is its opening/entry axis.
+# Top hole: opening faces +Z (up). Peg approaches pointing -Z.
+TOP_HOLE_NOMINAL_POS = (0.48, 0.0, 0.05)
+TOP_HOLE_BASE_QUAT = (1.0, 0.0, 0.0, 0.0)  # [w, x, y, z]
+
+# Side hole: sits on the +Y face of a vertical wall at y ~ -0.29 (robot's right
+# when facing +X). Rotating -90 deg about X sends local +Z -> world +Y, so the
+# opening faces the robot and the peg approaches pointing -Y.
+SIDE_WALL_THICKNESS_HALF = 0.010
+SIDE_HOLE_NOMINAL_POS = (0.50, -0.28, 0.20)
+SIDE_HOLE_BASE_QUAT = (float(np.sqrt(0.5)), -float(np.sqrt(0.5)), 0.0, 0.0)
+SIDE_WALL_HALF_EXTENTS = (0.16, SIDE_WALL_THICKNESS_HALF, 0.15)
+
+# Optional second hole (OFF by default; enable with enable_second_hole=True).
+#   "table": same vertical orientation as the top hole, 15 cm to its right (-Y).
+#            A same-orientation decoy target: no tool re-orientation needed, so
+#            the only difference is *which hole the operator intends*. Best for
+#            shared-autonomy demos.
+#   "wall":  horizontal hole in a vertical wall (perpendicular to the top hole).
+SECOND_HOLE_LAYOUTS = {
+    "table": {"pos": (0.48, -0.15, 0.05), "quat": TOP_HOLE_BASE_QUAT, "wall": False},
+    "wall": {"pos": SIDE_HOLE_NOMINAL_POS, "quat": SIDE_HOLE_BASE_QUAT, "wall": True},
+}
+
+HOLE_KEYS = ("top", "side")
+
 
 def _quat_to_rotmat(quat_wxyz: np.ndarray) -> np.ndarray:
     """Convert unit quaternion [w, x, y, z] to 3x3 rotation matrix."""
@@ -99,8 +130,21 @@ def _quat_to_rotmat(quat_wxyz: np.ndarray) -> np.ndarray:
     )
 
 
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product a * b for [w, x, y, z] quaternions."""
+    out = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mulQuat(out, np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64))
+    return out
+
+
+def _hole_quat(base_quat: np.ndarray, yaw_rad: float) -> np.ndarray:
+    """Base hole orientation followed by a yaw about the hole's own entry axis."""
+    q_yaw = np.array([np.cos(yaw_rad / 2.0), 0.0, 0.0, np.sin(yaw_rad / 2.0)], dtype=np.float64)
+    return _quat_mul(base_quat, q_yaw)
+
+
 def _find_tool_body(root: ET.Element) -> ET.Element:
-    """Locate the terminal link body (child of joint_7) in gen3.xml."""
+    """Locate the terminal link body (the body that owns joint_7) in gen3.xml."""
     for body in root.iter("body"):
         for jnt in body.findall("joint"):
             if jnt.get("name") in ("joint_7", "actuator7"):
@@ -114,22 +158,109 @@ def _find_tool_body(root: ET.Element) -> ET.Element:
     return bodies[-1]
 
 
-def _detect_flange_transform(tool_body: ET.Element) -> Tuple[str, Optional[str], float]:
-    """Detect the flange site position/orientation on tool_body.
+def _detect_flange_transform(tool_body: ET.Element) -> Tuple[str, float]:
+    """Return (flange position string, outward-axis sign along the body's Z).
 
-    In mujoco_menagerie/kinova_gen3/gen3.xml, the bracelet_link tool flange
-    typically faces -Z (site ``pinch_site`` at ``0 0 -0.0615``). Mounting the
-    peg along the flange's actual outward axis prevents the peg from sticking
-    backwards into the wrist links.
+    The site's own ``quat`` is deliberately ignored: applying it to the peg
+    mount *and* flipping the peg along Z can double-flip the peg so it points
+    back into the wrist. Instead the peg axis is built explicitly in
+    ``build_peg_in_hole_xml`` and verified in ``_build_model``.
     """
     for site in tool_body.findall("site"):
         pos_str = site.get("pos", "0 0 -0.0615")
-        quat_str = site.get("quat")
         vals = [float(v) for v in pos_str.split()]
         z_sign = -1.0 if len(vals) >= 3 and vals[2] < 0 else 1.0
-        return pos_str, quat_str, z_sign
+        return pos_str, z_sign
     # Default for Kinova Gen3 bracelet_link (-Z outward flange)
-    return "0 0 -0.0615", None, -1.0
+    return "0 0 -0.0615", -1.0
+
+
+def _add_hole_assembly(
+    parent: ET.Element,
+    prefix: str,
+    pos: Tuple[float, float, float],
+    quat_wxyz: Tuple[float, float, float, float],
+    peg_radius: float,
+    clearance_m: float,
+    hole_depth: float,
+) -> None:
+    """Add an octagonal primitive-box hole (body + walls + bottom + sites).
+
+    Names produced: ``{prefix}_body``, ``{prefix}_wall_{i}``,
+    ``{prefix}_bottom_plate``, ``{prefix}_entry``, ``{prefix}_bottom``.
+    The hole's local +Z is the entry axis.
+    """
+    hx, hy, hz = pos
+    qw, qx, qy, qz = quat_wxyz
+    hole_body = ET.SubElement(
+        parent,
+        "body",
+        {
+            "name": f"{prefix}_body",
+            "pos": f"{hx:.4f} {hy:.4f} {hz:.4f}",
+            "quat": f"{qw:.6f} {qx:.6f} {qy:.6f} {qz:.6f}",
+        },
+    )
+    inner_r = peg_radius + clearance_m
+    wall_thickness = 0.025
+    wall_half_h = hole_depth / 2.0
+    n_sides = 8
+    half_seg_len = inner_r * np.tan(np.pi / n_sides) + wall_thickness * 0.45
+
+    for i in range(n_sides):
+        theta = i * (2.0 * np.pi / n_sides)
+        r_mid = inner_r + wall_thickness / 2.0
+        wx = r_mid * np.cos(theta)
+        wy = r_mid * np.sin(theta)
+        ET.SubElement(
+            hole_body,
+            "geom",
+            {
+                "name": f"{prefix}_wall_{i}",
+                "type": "box",
+                "pos": f"{wx:.5f} {wy:.5f} {wall_half_h:.5f}",
+                "euler": f"0 0 {theta:.5f}",
+                "size": f"{wall_thickness / 2.0:.5f} {half_seg_len:.5f} {wall_half_h:.5f}",
+                "material": "hole_mat",
+                "friction": "0.4 0.005 0.0001",
+                "solref": "0.005 1.0",
+                "solimp": "0.95 0.99 0.001",
+                "condim": "4",
+            },
+        )
+
+    ET.SubElement(
+        hole_body,
+        "geom",
+        {
+            "name": f"{prefix}_bottom_plate",
+            "type": "cylinder",
+            "pos": "0 0 0.004",
+            "size": f"{inner_r + wall_thickness:.5f} 0.004",
+            "material": "hole_mat",
+            "condim": "3",
+        },
+    )
+    ET.SubElement(
+        hole_body,
+        "site",
+        {
+            "name": f"{prefix}_entry",
+            "pos": f"0 0 {hole_depth:.5f}",
+            "size": "0.004",
+            "rgba": "0.1 0.9 0.2 0.8",
+        },
+    )
+    ET.SubElement(
+        hole_body,
+        "site",
+        {
+            "name": f"{prefix}_bottom",
+            "pos": "0 0 0.008",
+            "size": "0.004",
+            "rgba": "0.1 0.5 1.0 0.8",
+        },
+    )
 
 
 def build_peg_in_hole_xml(
@@ -138,9 +269,15 @@ def build_peg_in_hole_xml(
     peg_length: float = 0.080,
     clearance_m: float = 0.003,
     hole_depth: float = 0.045,
-    nominal_hole_pos: Tuple[float, float, float] = (0.48, 0.0, 0.05),
+    nominal_hole_pos: Tuple[float, float, float] = TOP_HOLE_NOMINAL_POS,
+    second_hole_layout: Optional[str] = None,
+    side_hole_pos: Optional[Tuple[float, float, float]] = None,
 ) -> str:
-    """Build a self-contained MJCF XML string combining Kinova Gen3 + peg + hole."""
+    """Build a self-contained MJCF XML string: Kinova Gen3 + peg + top hole.
+
+    ``second_hole_layout`` (None | "table" | "wall") optionally adds a second
+    hole. None (default) leaves the scene with a single hole and no extra geometry.
+    """
     gen3_xml_path = (kinova_dir / "gen3.xml").resolve()
     if not gen3_xml_path.exists():
         raise FileNotFoundError(
@@ -240,13 +377,24 @@ def build_peg_in_hole_xml(
         "material",
         {"name": "table_mat", "rgba": "0.62 0.56 0.48 1.0", "specular": "0.1"},
     )
+    ET.SubElement(
+        asset,
+        "material",
+        {"name": "wall_mat", "rgba": "0.55 0.58 0.62 1.0", "specular": "0.1"},
+    )
 
-    # 5. Attach peg + peg_tip site + wrist_cam along the actual outward flange axis
+    # 5. Mount the peg on the body that owns joint_7 (the rotating end link),
+    #    extending along the flange's outward axis.
+    #
+    #    peg_mount's local +Z is the peg's outward axis. If the flange points
+    #    along the tool body's -Z, rotate the mount 180 deg about X so local
+    #    +Z == body -Z. Everything inside peg_mount then extends along +Z, and
+    #    the ``peg_tip`` site frame's Z axis points out of the peg tip.
     tool_body = _find_tool_body(root)
-    flange_pos, flange_quat, z_sign = _detect_flange_transform(tool_body)
+    flange_pos, z_sign = _detect_flange_transform(tool_body)
     peg_attrs: Dict[str, str] = {"name": "peg_body", "pos": flange_pos}
-    if flange_quat is not None:
-        peg_attrs["quat"] = flange_quat
+    if z_sign < 0:
+        peg_attrs["quat"] = "0 1 0 0"
     peg_mount = ET.SubElement(tool_body, "body", peg_attrs)
 
     ET.SubElement(
@@ -256,7 +404,7 @@ def build_peg_in_hole_xml(
             "name": "peg_geom",
             "type": "cylinder",
             "size": f"{peg_radius:.5f} {peg_length / 2.0:.5f}",
-            "pos": f"0 0 {z_sign * peg_length / 2.0:.5f}",
+            "pos": f"0 0 {peg_length / 2.0:.5f}",
             "material": "peg_mat",
             "mass": "0.12",
             "friction": "0.4 0.005 0.0001",
@@ -270,7 +418,7 @@ def build_peg_in_hole_xml(
         "site",
         {
             "name": "peg_tip",
-            "pos": f"0 0 {z_sign * peg_length:.5f}",
+            "pos": f"0 0 {peg_length:.5f}",
             "size": "0.004",
             "rgba": "1 0.9 0 0.8",
         },
@@ -286,7 +434,7 @@ def build_peg_in_hole_xml(
         },
     )
 
-    # 6. Add worldbody environment: lights, floor, table, and octagonal hole block
+    # 6. Worldbody environment: lights, floor, table
     worldbody = root.find("worldbody")
     assert worldbody is not None
 
@@ -339,72 +487,51 @@ def build_peg_in_hole_xml(
         },
     )
 
-    hx, hy, hz = nominal_hole_pos
-    hole_body = ET.SubElement(
+    # 7. Top hole (vertical, in the table)
+    _add_hole_assembly(
         worldbody,
-        "body",
-        {"name": "hole_body", "pos": f"{hx:.4f} {hy:.4f} {hz:.4f}"},
+        prefix="hole",
+        pos=nominal_hole_pos,
+        quat_wxyz=TOP_HOLE_BASE_QUAT,
+        peg_radius=peg_radius,
+        clearance_m=clearance_m,
+        hole_depth=hole_depth,
     )
-    inner_r = peg_radius + clearance_m
-    wall_thickness = 0.025
-    wall_half_h = hole_depth / 2.0
-    n_sides = 8
-    half_seg_len = inner_r * np.tan(np.pi / n_sides) + wall_thickness * 0.45
 
-    for i in range(n_sides):
-        theta = i * (2.0 * np.pi / n_sides)
-        r_mid = inner_r + wall_thickness / 2.0
-        wx = r_mid * np.cos(theta)
-        wy = r_mid * np.sin(theta)
-        ET.SubElement(
-            hole_body,
-            "geom",
-            {
-                "name": f"hole_wall_{i}",
-                "type": "box",
-                "pos": f"{wx:.5f} {wy:.5f} {wall_half_h:.5f}",
-                "euler": f"0 0 {theta:.5f}",
-                "size": f"{wall_thickness / 2.0:.5f} {half_seg_len:.5f} {wall_half_h:.5f}",
-                "material": "hole_mat",
-                "friction": "0.4 0.005 0.0001",
-                "solref": "0.005 1.0",
-                "solimp": "0.95 0.99 0.001",
-                "condim": "4",
-            },
+    # 8. Optional second hole (off by default).
+    if second_hole_layout is not None:
+        if second_hole_layout not in SECOND_HOLE_LAYOUTS:
+            raise ValueError(
+                f"second_hole_layout must be one of {tuple(SECOND_HOLE_LAYOUTS)}, "
+                f"got {second_hole_layout!r}"
+            )
+        layout = SECOND_HOLE_LAYOUTS[second_hole_layout]
+        sx, sy, sz = side_hole_pos if side_hole_pos is not None else layout["pos"]
+        if layout["wall"]:
+            # Vertical plate standing on the table; its +Y face coincides with
+            # the hole body origin plane.
+            wall_hx, wall_hy, wall_hz = SIDE_WALL_HALF_EXTENTS
+            ET.SubElement(
+                worldbody,
+                "geom",
+                {
+                    "name": "side_wall",
+                    "type": "box",
+                    "pos": f"{sx:.4f} {sy - wall_hy:.4f} {sz:.4f}",
+                    "size": f"{wall_hx:.4f} {wall_hy:.4f} {wall_hz:.4f}",
+                    "material": "wall_mat",
+                    "condim": "3",
+                },
+            )
+        _add_hole_assembly(
+            worldbody,
+            prefix="side_hole",
+            pos=(sx, sy, sz),
+            quat_wxyz=layout["quat"],
+            peg_radius=peg_radius,
+            clearance_m=clearance_m,
+            hole_depth=hole_depth,
         )
-
-    ET.SubElement(
-        hole_body,
-        "geom",
-        {
-            "name": "hole_bottom_plate",
-            "type": "cylinder",
-            "pos": "0 0 0.004",
-            "size": f"{inner_r + wall_thickness:.5f} 0.004",
-            "material": "hole_mat",
-            "condim": "3",
-        },
-    )
-    ET.SubElement(
-        hole_body,
-        "site",
-        {
-            "name": "hole_entry",
-            "pos": f"0 0 {hole_depth:.5f}",
-            "size": "0.004",
-            "rgba": "0.1 0.9 0.2 0.8",
-        },
-    )
-    ET.SubElement(
-        hole_body,
-        "site",
-        {
-            "name": "hole_bottom",
-            "pos": "0 0 0.008",
-            "size": "0.004",
-            "rgba": "0.1 0.5 1.0 0.8",
-        },
-    )
 
     sensor_elem = root.find("sensor")
     if sensor_elem is None:
@@ -416,7 +543,7 @@ def build_peg_in_hole_xml(
 
 
 class KinovaPegInHoleEnv(RobotBackend):
-    """MuJoCo Kinova Gen3 7-DoF Peg-in-Hole environment."""
+    """MuJoCo Kinova Gen3 7-DoF Peg-in-Hole environment (top + side holes)."""
 
     def __init__(
         self,
@@ -427,13 +554,31 @@ class KinovaPegInHoleEnv(RobotBackend):
         hole_depth: float = 0.045,
         dls_damping: float = 0.04,
         nullspace_gain: float = 0.5,
+        hole: str = "top",
+        enable_second_hole: bool = False,
+        second_hole_layout: str = "table",
     ) -> None:
+        if second_hole_layout not in SECOND_HOLE_LAYOUTS:
+            raise ValueError(
+                f"second_hole_layout must be one of {tuple(SECOND_HOLE_LAYOUTS)}, "
+                f"got {second_hole_layout!r}"
+            )
+        valid_holes = HOLE_KEYS + ("random",) if enable_second_hole else ("top",)
+        if hole not in valid_holes:
+            raise ValueError(
+                f"hole must be one of {valid_holes}, got {hole!r} "
+                f"(enable_second_hole={enable_second_hole})"
+            )
+        self.enable_second_hole = enable_second_hole
+        self.second_hole_layout = second_hole_layout
+
         if kinova_dir is None:
-            # Support both repo-root/assets and local-dir/assets layouts
+            # Prefer the shared repository asset location. This is independent
+            # of the shell's working directory (scripts/, repo root, etc.).
             here = Path(__file__).resolve()
             candidates = [
                 here.parents[2] / "assets" / "mujoco_menagerie" / "kinova_gen3",
-                here.parent / "assets" / "mujoco_menagerie" / "kinova_gen3",
+                here.parents[2] / "scripts" / "assets" / "mujoco_menagerie" / "kinova_gen3",
             ]
             kinova_dir = next((p for p in candidates if (p / "gen3.xml").exists()), candidates[0])
         self.kinova_dir = Path(kinova_dir)
@@ -444,7 +589,13 @@ class KinovaPegInHoleEnv(RobotBackend):
         self.dls_damping = dls_damping
         self.nullspace_gain = nullspace_gain
 
-        self._nominal_hole_pos = np.array([0.48, 0.0, 0.05], dtype=np.float64)
+        self._default_hole = hole
+        self.active_hole = "top" if hole == "random" else hole
+
+        self._nominal_hole_pos = np.array(TOP_HOLE_NOMINAL_POS, dtype=np.float64)
+        self._nominal_side_hole_pos = np.array(
+            SECOND_HOLE_LAYOUTS[second_hole_layout]["pos"], dtype=np.float64
+        )
         self._rng = np.random.default_rng(self.config.seed)
         self._renderer: Any = None
         self.xml_str: str = ""
@@ -460,6 +611,8 @@ class KinovaPegInHoleEnv(RobotBackend):
             clearance_m=clearance_m,
             hole_depth=self.hole_depth,
             nominal_hole_pos=tuple(self._nominal_hole_pos),  # type: ignore[arg-type]
+            second_hole_layout=self.second_hole_layout if self.enable_second_hole else None,
+            side_hole_pos=tuple(self._nominal_side_hole_pos),  # type: ignore[arg-type]
         )
         self.model = mujoco.MjModel.from_xml_string(self.xml_str)
         self.data = mujoco.MjData(self.model)
@@ -485,23 +638,83 @@ class KinovaPegInHoleEnv(RobotBackend):
             raise RuntimeError(f"Missing actuator mapping for joints: {self.actuator_ids}")
 
         self.peg_tip_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_tip")
-        self.hole_entry_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "hole_entry")
-        self.hole_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hole_body")
         self.peg_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "peg_geom")
         self.table_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "work_table")
-        self.hole_geom_ids = {
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"hole_wall_{i}")
-            for i in range(8)
+        self.side_wall_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "side_wall")
+        self.obstacle_geom_ids = {g for g in (self.table_geom_id, self.side_wall_geom_id) if g >= 0}
+
+        # Per-hole bookkeeping (top: prefix "hole", side: prefix "side_hole")
+        specs = {
+            "top": ("hole", self._nominal_hole_pos, np.array(TOP_HOLE_BASE_QUAT, dtype=np.float64)),
         }
-        self.hole_geom_ids.add(
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "hole_bottom_plate")
-        )
+        if self.enable_second_hole:
+            specs["side"] = (
+                "side_hole",
+                self._nominal_side_hole_pos,
+                np.array(SECOND_HOLE_LAYOUTS[self.second_hole_layout]["quat"], dtype=np.float64),
+            )
+        self._holes: Dict[str, Dict[str, Any]] = {}
+        self.hole_geom_ids: set = set()
+        for key, (prefix, nominal_pos, base_quat) in specs.items():
+            gids = {
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{prefix}_wall_{i}")
+                for i in range(8)
+            }
+            gids.add(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{prefix}_bottom_plate")
+            )
+            self._holes[key] = {
+                "body_id": mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"{prefix}_body"),
+                "entry_site_id": mujoco.mj_name2id(
+                    self.model, mujoco.mjtObj.mjOBJ_SITE, f"{prefix}_entry"
+                ),
+                "geom_ids": gids,
+                "nominal_pos": nominal_pos.copy(),
+                "base_quat": base_quat,
+            }
+            self.hole_geom_ids |= gids
+        self._select_hole(self.active_hole)
+
         self.force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "peg_force")
         self.torque_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "peg_torque")
         self.key_light_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_LIGHT, "key_light")
 
         self._jacp = np.zeros((3, self.model.nv), dtype=np.float64)
         self._jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+
+        self._verify_peg_mount()
+
+    def _select_hole(self, key: str) -> None:
+        """Make ``key`` ('top' or 'side') the hole used for observations/success."""
+        if key not in self._holes:
+            raise ValueError(f"Unknown hole {key!r}; expected one of {tuple(self._holes)}")
+        self.active_hole = key
+        self.hole_body_id = self._holes[key]["body_id"]
+        self.hole_entry_site_id = self._holes[key]["entry_site_id"]
+
+    def _verify_peg_mount(self) -> None:
+        """Check the peg rides on joint_7's body and points outward, not into the wrist."""
+        peg_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "peg_body")
+        tool_body_id = int(self.model.jnt_bodyid[self.joint_ids[-1]])
+        if int(self.model.body_parentid[peg_body_id]) != tool_body_id:
+            raise RuntimeError(
+                "peg_body is not a child of the body that owns joint_7; "
+                "the peg would not use all 7 DoF."
+            )
+
+        # Outward check at the home posture: peg tip must lie beyond the tool
+        # body origin along the direction from the previous link to the tool body.
+        self.data.qpos[self.qpos_ids] = DEFAULT_HOME_QPOS
+        mujoco.mj_forward(self.model, self.data)
+        parent_id = int(self.model.body_parentid[tool_body_id])
+        tool_pos = self.data.xpos[tool_body_id]
+        axis_out = tool_pos - self.data.xpos[parent_id]
+        tip_vec = self.data.site_xpos[self.peg_tip_site_id] - tool_pos
+        if float(np.dot(axis_out, tip_vec)) <= 0.0:
+            raise RuntimeError(
+                "Peg points back into the wrist. Flip the outward-axis sign in "
+                "_detect_flange_transform (z_sign) for your gen3.xml."
+            )
 
     def _init_episode_buffers(self) -> None:
         self._step_index = 0
@@ -529,12 +742,26 @@ class KinovaPegInHoleEnv(RobotBackend):
         self,
         seed: Optional[int] = None,
         config: Optional[EpisodeConfig] = None,
+        hole: Optional[str] = None,
     ) -> Observation:
+        """Reset the episode.
+
+        ``hole``: ``"top"``, ``"side"`` or ``"random"``; defaults to the value
+        given at construction.
+        """
         if config is not None:
             self.config = config
         active_seed = self.config.seed if seed is None else seed
         self._rng = np.random.default_rng(active_seed)
         dr = self.config.domain_randomization
+
+        choice = hole if hole is not None else self._default_hole
+        available = tuple(self._holes)
+        valid = available + ("random",) if len(available) > 1 else available
+        if choice not in valid:
+            raise ValueError(f"hole must be one of {valid}, got {choice!r}")
+        if choice == "random":
+            choice = available[int(self._rng.integers(0, len(available)))]
 
         c_lo, c_hi = dr.clearance_mm_range
         clearance_m = (
@@ -545,18 +772,30 @@ class KinovaPegInHoleEnv(RobotBackend):
 
         mujoco.mj_resetData(self.model, self.data)
         self._init_episode_buffers()
+        self._select_hole(choice)
 
-        hole_pos = self._nominal_hole_pos.copy()
+        # Put both holes back to nominal, then randomize only the active one.
+        for spec in self._holes.values():
+            self.model.body_pos[spec["body_id"]] = spec["nominal_pos"]
+            self.model.body_quat[spec["body_id"]] = spec["base_quat"]
+
+        spec = self._holes[choice]
+        hole_pos = spec["nominal_pos"].copy()
         hole_yaw = 0.0
         if dr.enabled:
-            hole_pos[0] += float(self._rng.uniform(-dr.hole_xy_range_m[0], dr.hole_xy_range_m[0]))
-            hole_pos[1] += float(self._rng.uniform(-dr.hole_xy_range_m[1], dr.hole_xy_range_m[1]))
+            if choice == "top" or not SECOND_HOLE_LAYOUTS[self.second_hole_layout]["wall"]:
+                # Slide on the table plane (X, Y)
+                hole_pos[0] += float(self._rng.uniform(-dr.hole_xy_range_m[0], dr.hole_xy_range_m[0]))
+                hole_pos[1] += float(self._rng.uniform(-dr.hole_xy_range_m[1], dr.hole_xy_range_m[1]))
+            else:
+                # Slide on the wall plane (X, Z)
+                hole_pos[0] += float(self._rng.uniform(-dr.hole_xy_range_m[0], dr.hole_xy_range_m[0]))
+                hole_pos[2] += float(self._rng.uniform(-dr.hole_xy_range_m[1], dr.hole_xy_range_m[1]))
             hole_yaw = float(self._rng.uniform(-dr.hole_yaw_range_rad, dr.hole_yaw_range_rad))
 
+        hole_quat = _hole_quat(spec["base_quat"], hole_yaw)
         self.model.body_pos[self.hole_body_id] = hole_pos
-        self.model.body_quat[self.hole_body_id] = np.array(
-            [np.cos(hole_yaw / 2.0), 0.0, 0.0, np.sin(hole_yaw / 2.0)], dtype=np.float64
-        )
+        self.model.body_quat[self.hole_body_id] = hole_quat
 
         friction = 0.4
         if dr.enabled:
@@ -581,21 +820,24 @@ class KinovaPegInHoleEnv(RobotBackend):
         self.data.ctrl[self.actuator_ids] = DEFAULT_HOME_QPOS.copy()
         mujoco.mj_forward(self.model, self.data)
 
-        start_target = hole_pos.copy()
-        start_target[2] += self.hole_depth + float(
+        # Start pose: above the hole entry along the hole axis, peg pointing into the hole.
+        hole_R = _quat_to_rotmat(hole_quat)
+        hole_x, hole_y, hole_axis = hole_R[:, 0], hole_R[:, 1], hole_R[:, 2]
+        standoff = self.hole_depth + float(
             self._rng.uniform(dr.peg_start_z_offset_m[0], dr.peg_start_z_offset_m[1])
             if dr.enabled
             else np.mean(dr.peg_start_z_offset_m)
         )
+        start_target = hole_pos + hole_axis * standoff
         if dr.enabled:
-            start_target[0] += float(
+            start_target += hole_x * float(
                 self._rng.uniform(-dr.peg_start_xy_offset_m[0], dr.peg_start_xy_offset_m[0])
             )
-            start_target[1] += float(
+            start_target += hole_y * float(
                 self._rng.uniform(-dr.peg_start_xy_offset_m[1], dr.peg_start_xy_offset_m[1])
             )
 
-        self._settle_to_start_position(start_target)
+        self._settle_to_start_pose(start_target, target_axis=-hole_axis)
 
         lat_lo, lat_hi = dr.latency_steps_range
         latency_steps = (
@@ -607,6 +849,7 @@ class KinovaPegInHoleEnv(RobotBackend):
 
         self.episode_params = {
             "seed": active_seed,
+            "active_hole": choice,
             "hole_pos": hole_pos.tolist(),
             "hole_yaw_rad": hole_yaw,
             "start_target_pos": start_target.tolist(),
@@ -618,24 +861,50 @@ class KinovaPegInHoleEnv(RobotBackend):
         }
         return self.get_observation()
 
-    def _settle_to_start_position(self, target_pos: np.ndarray, iters: int = 40) -> None:
+    def _settle_to_start_pose(
+        self,
+        target_pos: np.ndarray,
+        target_axis: np.ndarray,
+        iters: int = 300,
+        pos_tol: float = 1e-3,
+        ang_tol: float = 1e-2,
+    ) -> None:
+        """Kinematically move the peg tip to ``target_pos`` with its axis along ``target_axis``.
+
+        Uses the full 6x7 Jacobian: position + peg-axis alignment (roll about
+        the peg axis is free) with a nullspace pull toward DEFAULT_HOME_QPOS.
+        This keeps the 7-DoF arm in a sane configuration instead of letting a
+        position-only solve wander (e.g. joint_3 spinning to ~4.9 rad).
+        """
+        target_axis = np.asarray(target_axis, dtype=np.float64)
+        target_axis = target_axis / np.linalg.norm(target_axis)
+        lam2 = self.dls_damping**2
+
         for _ in range(iters):
             mujoco.mj_forward(self.model, self.data)
             cur_pos = self.data.site_xpos[self.peg_tip_site_id].copy()
+            cur_axis = self.data.site_xmat[self.peg_tip_site_id].reshape(3, 3)[:, 2].copy()
+
             pos_err = target_pos - cur_pos
-            if np.linalg.norm(pos_err) < 1e-3:
+            rot_err = np.cross(cur_axis, target_axis)  # world-frame rotation vector (axis only)
+            if np.linalg.norm(pos_err) < pos_tol and np.linalg.norm(rot_err) < ang_tol:
                 break
+
             mujoco.mj_jacSite(self.model, self.data, self._jacp, self._jacr, self.peg_tip_site_id)
-            Jp = self._jacp[:, self.dof_ids]
-            jjt = Jp @ Jp.T + (self.dls_damping**2) * np.eye(3)
-            dq = Jp.T @ np.linalg.solve(jjt, 0.5 * pos_err)
-            q_new = np.clip(
-                self.data.qpos[self.qpos_ids] + dq,
-                KINOVA_JOINT_LIMITS[:, 0],
-                KINOVA_JOINT_LIMITS[:, 1],
+            J = np.vstack([self._jacp[:, self.dof_ids], self._jacr[:, self.dof_ids]])
+            J_pinv = J.T @ np.linalg.inv(J @ J.T + lam2 * np.eye(6))
+
+            q_cur = self.data.qpos[self.qpos_ids].copy()
+            null_proj = np.eye(NUM_ARM_JOINTS) - J_pinv @ J
+            err = np.concatenate([pos_err, rot_err])
+            dq = J_pinv @ (0.5 * err) + null_proj @ (0.1 * (DEFAULT_HOME_QPOS - q_cur))
+            dq = np.clip(dq, -0.1, 0.1)
+
+            self.data.qpos[self.qpos_ids] = np.clip(
+                q_cur + dq, KINOVA_JOINT_LIMITS[:, 0], KINOVA_JOINT_LIMITS[:, 1]
             )
-            self.data.qpos[self.qpos_ids] = q_new
             self.data.qvel[self.dof_ids] = 0.0
+
         self._q_target = self.data.qpos[self.qpos_ids].copy()
         self.data.ctrl[self.actuator_ids] = self._q_target.copy()
         mujoco.mj_forward(self.model, self.data)
@@ -761,7 +1030,8 @@ class KinovaPegInHoleEnv(RobotBackend):
                 peg_contact_force += float(np.linalg.norm(c_force[:3]))
                 if g1 in self.hole_geom_ids or g2 in self.hole_geom_ids:
                     peg_hole_contact = True
-                if self.table_geom_id in pair:
+                # Table or side wall counts as an obstacle collision
+                if pair & self.obstacle_geom_ids:
                     table_collision = True
 
         wrench = np.zeros(6, dtype=np.float64)
@@ -834,6 +1104,7 @@ class KinovaPegInHoleEnv(RobotBackend):
         ee_v_lin = self._jacp[:, self.dof_ids] @ raw_qvel
         ee_v_ang = self._jacr[:, self.dof_ids] @ raw_qvel
 
+        # Active hole's entry frame (local +Z = entry axis, for either hole)
         hole_pos = self.data.site_xpos[self.hole_entry_site_id].copy()
         hole_xmat = self.data.site_xmat[self.hole_entry_site_id].reshape(3, 3)
         hole_quat = np.zeros(4, dtype=np.float64)
@@ -883,6 +1154,7 @@ class KinovaPegInHoleEnv(RobotBackend):
             "insertion_depth_m": insertion_depth,
             "tilt_error_rad": tilt_err,
             "hold_steps": self._hold_steps,
+            "active_hole": self.active_hole,
         }
 
         if (

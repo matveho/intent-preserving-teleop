@@ -1,6 +1,6 @@
 # PHANToM Omni Setup (Linux, ROS 2, and SAW)
 > [!WARNING]
-> Install jazzy, not humble. Install libgraphviz-dev and graphviz.
+> Use Ubuntu 24.04 and ROS 2 Jazzy. Apply the compatibility fix in step 8 before building the current SAW sources.
 
 
 This guide describes how to connect the original **SensAble PHANToM Omni (FireWire / IEEE 1394)** to Linux, install the vendor driver and OpenHaptics SDK, build the JHU cisst/SAW integration, and read the device through ROS 2.
@@ -51,8 +51,8 @@ For the documented baseline, use:
 
 | Component | Recommended version |
 |---|---|
-| Operating system | Ubuntu 22.04 LTS (64-bit) |
-| ROS | ROS 2 Humble |
+| Operating system | Ubuntu 24.04 LTS (64-bit) |
+| ROS | ROS 2 Jazzy |
 | Build system | `colcon` |
 | Multi-repository tool | `vcstool` |
 | Device integration | JHU cisst/SAW `sawSensablePhantom` |
@@ -170,9 +170,9 @@ At this point, Linux and the vendor configuration utility should recognize the O
 
 ## 5. Install ROS 2
 
-For the recommended Ubuntu 22.04 setup, install **ROS 2 Humble**.
+For the recommended Ubuntu 24.04 setup, install **ROS 2 Jazzy**.
 
-Follow the official ROS 2 instructions for Ubuntu 22.04: [ROS 2 Humble — Ubuntu (Debian packages)](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
+Follow the official ROS 2 instructions for Ubuntu 24.04: [ROS 2 Jazzy — Ubuntu (Debian packages)](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
 
 The official instructions cover locale configuration, adding the ROS package repository and key, and installing the ROS packages. Prefer those maintained instructions over older guides that use `apt-key` or obsolete ROS distributions.
 
@@ -221,18 +221,18 @@ sudo apt upgrade
 ```
 
 > [!WARNING]
-> Due to early updates in Ubuntu 22.04 it is important that `systemd` and `udev-related` packages are updated before installing ROS 2. The installation of ROS 2’s dependencies on a freshly installed system without upgrading can trigger the **removal of critical system packages.**
+> Due to early updates in Ubuntu 24.04 it is important that `systemd` and `udev-related` packages are updated before installing ROS 2. The installation of ROS 2’s dependencies on a freshly installed system without upgrading can trigger the **removal of critical system packages.**
 
 Desktop Install (Recommended): ROS, RViz, demos, tutorials.
 ```shell
-sudo apt install ros-humble-desktop
+sudo apt install ros-jazzy-desktop
 ```
 
 ### 5.4 Environment setup
 After configuring the ROS apt repository and installing the desktop distribution and development tools as described in the official guide, source ROS 2 in the current terminal:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 ```
 
 Verify the environment:
@@ -242,7 +242,7 @@ printenv ROS_DISTRO
 ros2 --help
 ```
 
-`ROS_DISTRO` should report `humble`.
+`ROS_DISTRO` should report `jazzy`.
 
 ## 6. Install Workspace Tools & System Dependencies
 
@@ -258,7 +258,7 @@ sudo apt install -y git python3-vcstool python3-colcon-common-extensions python3
 Install the additional Ubuntu dependencies listed by the JHU cisst/SAW build instructions for Ubuntu
 
 ```bash
-sudo apt install libxml2-dev libraw1394-dev libncurses5-dev qtcreator swig sox espeak cmake-curses-gui cmake-qt-gui git subversion gfortran libcppunit-dev libqt5xmlpatterns5-dev libbluetooth-dev libhidapi-dev python3-pyudev gfortran-9 ros-humble-joint-state-publisher* ros-humble-xacro
+sudo apt install build-essential cmake git libxml2-dev libraw1394-dev libjsoncpp-dev qtbase5-dev libqt5opengl5-dev libqt5xmlpatterns5-dev python3-dev python3-numpy swig graphviz libgraphviz-dev ros-jazzy-joint-state-publisher ros-jazzy-robot-state-publisher ros-jazzy-xacro ros-jazzy-rviz2
 ```
 
 Some packages may already be installed. If `apt` cannot find a package, check the exact package name and your enabled Ubuntu repositories rather than silently skipping a required dependency.
@@ -326,10 +326,21 @@ vcs import --workers 1 --retry 10 --recursive --input https://raw.githubusercont
 
 ## 8. Install ROS Dependencies & Build
 
+Current `sawSensablePhantom` sources still use removed cisst CMake names. Without the fix, the core package can report success while skipping its library, and the ROS package fails looking for `cisstQt` or `sawSensablePhantom`.
+
+From the root of this project repository, apply the bundled fix to the workspace created in step 7:
+
+```bash
+bash scripts/fix_phantom_build.sh "$HOME/ros2_ws"
+```
+
+If your workspace is `~/ros_ws`, pass `"$HOME/ros_ws"` instead and use that path in the commands below. The script changes only the imported SAW sources, is safe to rerun, and needs no sudo. It updates cisst discovery/linking, finds the installed OpenHaptics library, corrects the ROS 2 visualization dependency, and excludes obsolete ROS 1 packages. Review the changes with `git -C ~/ros2_ws/src/cisst-saw/sawSensablePhantom diff`.
+
+
 Make sure the ROS 2 environment is sourced:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 ```
 
 Move to the workspace root:
@@ -341,7 +352,7 @@ cd ~/ros2_ws
 Install dependencies declared by the packages in the workspace:
 
 ```bash
-rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
+rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
 ```
 
 Build the workspace in Release mode:
@@ -373,7 +384,7 @@ ros2 pkg executables sensable_phantom
 If you open a new terminal, source both the ROS installation and the workspace overlay again:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
@@ -424,7 +435,7 @@ The ROS package is named `sensable_phantom`, and its executable is also named `s
 First, make sure both environments are sourced:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
@@ -569,7 +580,7 @@ phantom_ws/
 Source ROS 2 first:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 ```
 
 Create the virtual environment if it doesn't already exist:
@@ -602,7 +613,7 @@ python -m pip install -r phantom_mujoco/requirements.txt
 Make sure ROS 2 and the virtual environment are active:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 ```
 
@@ -652,7 +663,7 @@ Open a second terminal:
 ```bash
 cd ~/phantom_ws
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 source install/setup.bash
 
@@ -687,7 +698,7 @@ python /absolute/path/to/main.py
 ### `sawSensablePhantomQtExample` is not found
 
 - Confirm the workspace built successfully.
-- Source `/opt/ros/humble/setup.bash`.
+- Source `/opt/ros/jazzy/setup.bash`.
 - Source `~/ros2_ws/install/setup.bash`.
 - Check whether the executable was installed and whether the SAW component was found during CMake configuration.
 
@@ -705,7 +716,7 @@ The package's CMake configuration checks for `catkin` before checking for `ament
 Open a clean terminal, source only ROS 2, and rebuild:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 cd ~/ros2_ws
 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
@@ -725,5 +736,5 @@ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 - [sawSensablePhantom driver instructions](https://github.com/jhu-saw/sawSensablePhantom/blob/main/drivers.md)
 - [PHANToM Omni FireWire driver installer](https://github.com/jhu-cisst-external/phantom-omni-1394-drivers)
 - [JHU SAW VCS repository](https://github.com/jhu-saw/vcs)
-- [ROS 2 Humble installation on Ubuntu](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-- [ROS 2 colcon tutorial](https://docs.ros.org/en/humble/Tutorials/Beginner-Client-Libraries/Colcon-Tutorial.html)
+- [ROS 2 Jazzy installation on Ubuntu](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
+- [ROS 2 colcon tutorial](https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Colcon-Tutorial.html)
