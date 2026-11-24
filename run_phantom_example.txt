@@ -1,2 +1,6 @@
-source /home/mokoneshnikov/environments/sensable/activate.sh
-/home/mokoneshnikov/environments/sensable/build/phantom-local/bin/sawSensablePhantomQtExample
+mkdir -p ~/projects
+cd ~/projects
+git clone https://github.com/matveho/intent-preserving-teleop.git
+cd intent-preserving-teleop
+
+source "$HOME/environments/sensable/activate.sh" && "$HOME/environments/sensable/build/phantom-local/bin/sawSensablePhantomQtExample"
