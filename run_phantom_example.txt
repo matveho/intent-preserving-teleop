@@ -4,3 +4,7 @@ git clone https://github.com/matveho/intent-preserving-teleop.git
 cd intent-preserving-teleop
 
 source "$HOME/environments/sensable/activate.sh" && "$HOME/environments/sensable/build/phantom-local/bin/sawSensablePhantomQtExample"
+
+ssh mokoneshnikov@csc-305-w06.cs.ualberta.ca 'mkdir -p /home/mokoneshnikov/phantom-config'
+scp -r /etc/SensAble/PHANToMDeviceDrivers/. mokoneshnikov@csc-305-w06.cs.ualberta.ca:/home/mokoneshnikov/phantom-config/
+ssh -t mokoneshnikov@csc-305-w06.cs.ualberta.ca 'sudo install -d -m 0755 /etc/SensAble/PHANToMDeviceDrivers && sudo cp -R /home/mokoneshnikov/phantom-config/. /etc/SensAble/PHANToMDeviceDrivers/ && sudo chmod -R a+rX /etc/SensAble/PHANToMDeviceDrivers'
