@@ -10,7 +10,7 @@ import argparse
 from pathlib import Path
 
 import crtk
-import sensable_phantom
+import arm
 import mujoco
 import mujoco.viewer
 
@@ -25,7 +25,7 @@ class example:
         # --------------------------------------------------
 
         # Create a Python Interface for the PHANToM OMNI
-        self.arm = sensable_phantom.arm(
+        self.arm = arm.arm(
             ral = ral,
             arm_name = robot_name,
             expected_interval = expected_interval
@@ -36,24 +36,24 @@ class example:
         # --------------------------------------------------
 
         # Load robot model
-        project_root = Path(__file__).resolve().parents[1]
-        model_path = project_root / "assets" / "scenes" / "main_scene.xml"
-        self.model = mujoco.MjModel.from_xml_path(str(model_path))
+        # project_root = Path(__file__).resolve().parents[1]
+        # model_path = project_root / "assets" / "scenes" / "main_scene.xml"
+        # self.model = mujoco.MjModel.from_xml_path(str(model_path))
 
         # Create simulation state
-        self.data = mujoco.MjData(self.model)
+        # self.data = mujoco.MjData(self.model)
 
         # Find the mocap body used to visualize the PHANToM position.
-        self.marker_id = self.model.body("phantom_target").mocapid
+        # self.marker_id = self.model.body("phantom_target").mocapid
 
-        if self.marker_id == -1:
-            raise RuntimeError(
-                "The MuJoCo model must contain a mocap body named "
-                "'phantom_target'."
-            )
+        # if self.marker_id == -1:
+        #     raise RuntimeError(
+        #         "The MuJoCo model must contain a mocap body named "
+        #         "'phantom_target'."
+        #     )
         
         # Launch viewer
-        self.viewer = mujoco.viewer.launch(self.model, self.data)
+        # self.viewer = mujoco.viewer.launch(self.model, self.data)
 
         print("PHANToM + MuJoCo initialized.")
         print("Move the PHANToM to move the marker in MuJoCo.")
@@ -76,28 +76,32 @@ class example:
         ]
 
         # Apply coordinate transformation and scaling here.
-        mujoco_position = phantom_position
+        # mujoco_position = phantom_position
 
         # Update the mocap body's position.
-        self.data.mocap_pos[self.marker_id] = mujoco_position
+        # self.data.mocap_pos[self.marker_id] = mujoco_position
 
         # Advance the simulation.
-        mujoco.mj_step(self.model, self.data)
+        # mujoco.mj_step(self.model, self.data)
 
         # Synchronize the viewer with the simulation.
         self.viewer.sync()
+
+        # print(phantom_position)
 
     # Main Method
     def run(self):
         """Main application loop."""
         try:
-            while self.viewer.is_running():
+            # while self.viewer.is_running():
+            while True:
                 self.update_simulation()
-                time.sleep(self.model.opt.timestep)
+                # time.sleep(self.model.opt.timestep)
+                time.sleep(1)
         except KeyboardInterrupt:
             print("\nStopping simulation...")
-        finally:
-            self.viewer.close()
+        # finally:
+            # self.viewer.close()
 
 if __name__ == "__main__":
     # Get ROS Arguments
