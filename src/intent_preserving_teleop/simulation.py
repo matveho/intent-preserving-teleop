@@ -1,18 +1,6 @@
-"""MuJoCo peg-in-hole environment with a 6-DoF Cartesian pose interface.
+"""MuJoCo Kinova Gen3 7-DoF Peg-in-Hole Simulation Environment.
 
-The public action is a bounded Cartesian position increment. A damped least-
-squares inverse-kinematics step maps it to the seven Gen3 joints, so callers
-(including a six-DoF PHANToM) do not need to command joint seven directly.
-"""
-
-
-"""
-Needs to be verified that it works...
-
-
-MuJoCo Kinova Gen3 7-DoF Peg-in-Hole Simulation Environment.
-
-Implements ``RobotBackend`` from ``schema.py`` for Step 1 (Monday handoff to
+Implements ``RobotBackend`` from ``schema.py`` for Step 1 (handoff to
 Graeme for PHANToM teleoperation and Matvey for logging/ACT).
 
 Key design points
@@ -20,29 +8,27 @@ Key design points
 1. **Joint-1 Movement & Stability Fixes**:
    - Explicitly indexes the 7 robot joints (``joint_1`` .. ``joint_7``) by name
      using ``jnt_qposadr``, ``jnt_dofadr``, and actuator ``trnid`` rather than
-     hardcoded ``[:7]`` slices (prevents off-by-one or extra-body indexing bugs).
-   - Adds base/shoulder contact exclusion and elevates the robot mount above
-     the floor/table so ``base_link`` / ``shoulder_link`` never pin Joint 1.
-   - Applies ``armature >= 0.1`` and ``damping >= 1.0`` and ensures continuous
-     joints (``joint_1``, ``joint_3``, ``joint_5``, ``joint_7``) have usable
-     position actuator bounds (addressing ``mujoco_menagerie`` Issue #232).
+     hardcoded ``[:7]`` slices.
+   - Excludes ``base_link``/``shoulder_link`` and ``peg_body``/wrist-link
+     self-contacts, and mounts ``peg_body`` at the actual flange/tool site
+     (auto-detected from ``gen3.xml``) so the peg never clips into the wrist.
+   - Applies ``armature >= 0.1`` and ``damping >= 1.0`` and sets explicit
+     ``ctrlrange`` bounds on continuous joints (``joint_1``, ``joint_3``,
+     ``joint_5``, ``joint_7``).
 2. **6-DoF Cartesian -> 7-DoF Kinova Gen3 Control**:
-   - Maps bounded 6-DoF Cartesian twists or pose increments (from PHANToM or
-     learned policy) to 7-DoF joint targets using Damped Least-Squares (DLS)
-     Jacobian IK with nullspace posture regularization toward ``q_home``.
+   - Maps bounded 6-DoF Cartesian twists or pose increments to 7-DoF joint
+     targets using Damped Least-Squares (DLS) Jacobian IK with nullspace
+     posture regularization toward ``DEFAULT_HOME_QPOS``.
    - Runs at the external control rate (default 50 Hz) while stepping MuJoCo
      physics at 500 Hz (0.002 s), with velocity/acceleration/workspace limits,
      command latency queue, and optional low-pass filtering.
 3. **Contact-Rich Peg-in-Hole & Domain Randomization**:
    - Peg rigidly attached to the Gen3 tool flange + wrist-mounted camera
      (``wrist_cam``) with per-episode lighting randomization.
-   - Octagonal primitive-box hole assembly with configurable clearance (starts
-     forgiving at 3 mm radial clearance, tightenable for validation).
+   - Octagonal primitive-box hole assembly with configurable clearance.
    - Deterministic ``reset(seed=...)``, randomized hole pose/friction/lighting,
      optional Kinova-like encoder quantization, and automated success/failure
-     detection (insertion, collision, out-of-bounds, jamming, timeout).
-
-
+     detection.
 """
 
 from __future__ import annotations
@@ -55,17 +41,30 @@ import xml.etree.ElementTree as ET
 import mujoco  # type: ignore
 import numpy as np
 
-from schema import (
-    CartesianCommand,
-    ContactState,
-    DEFAULT_SIM_TIMESTEP,
-    EpisodeConfig,
-    EpisodeStatus,
-    NUM_ARM_JOINTS,
-    Observation,
-    RobotBackend,
-    StepResult,
-)
+try:
+    from intent_preserving_teleop.schema import (
+        CartesianCommand,
+        ContactState,
+        DEFAULT_SIM_TIMESTEP,
+        EpisodeConfig,
+        EpisodeStatus,
+        NUM_ARM_JOINTS,
+        Observation,
+        RobotBackend,
+        StepResult,
+    )
+except ImportError:
+    from schema import (  # type: ignore
+        CartesianCommand,
+        ContactState,
+        DEFAULT_SIM_TIMESTEP,
+        EpisodeConfig,
+        EpisodeStatus,
+        NUM_ARM_JOINTS,
+        Observation,
+        RobotBackend,
+        StepResult,
+    )
 
 # Conservative Kinova Gen3 7-DoF home posture (arm forward, tool pointing down)
 DEFAULT_HOME_QPOS = np.array(
@@ -106,7 +105,6 @@ def _find_tool_body(root: ET.Element) -> ET.Element:
         for jnt in body.findall("joint"):
             if jnt.get("name") in ("joint_7", "actuator7"):
                 return body
-    # Fallback: last nested body in worldbody
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("gen3.xml is missing <worldbody>.")
@@ -114,6 +112,24 @@ def _find_tool_body(root: ET.Element) -> ET.Element:
     if not bodies:
         raise ValueError("No <body> elements found in gen3.xml.")
     return bodies[-1]
+
+
+def _detect_flange_transform(tool_body: ET.Element) -> Tuple[str, Optional[str], float]:
+    """Detect the flange site position/orientation on tool_body.
+
+    In mujoco_menagerie/kinova_gen3/gen3.xml, the bracelet_link tool flange
+    typically faces -Z (site ``pinch_site`` at ``0 0 -0.0615``). Mounting the
+    peg along the flange's actual outward axis prevents the peg from sticking
+    backwards into the wrist links.
+    """
+    for site in tool_body.findall("site"):
+        pos_str = site.get("pos", "0 0 -0.0615")
+        quat_str = site.get("quat")
+        vals = [float(v) for v in pos_str.split()]
+        z_sign = -1.0 if len(vals) >= 3 and vals[2] < 0 else 1.0
+        return pos_str, quat_str, z_sign
+    # Default for Kinova Gen3 bracelet_link (-Z outward flange)
+    return "0 0 -0.0615", None, -1.0
 
 
 def build_peg_in_hole_xml(
@@ -124,16 +140,12 @@ def build_peg_in_hole_xml(
     hole_depth: float = 0.045,
     nominal_hole_pos: Tuple[float, float, float] = (0.48, 0.0, 0.05),
 ) -> str:
-    """Build a self-contained MJCF XML string combining Kinova Gen3 + peg + hole.
-
-    Resolves all mesh paths in ``gen3.xml`` to absolute paths so the model can
-    be loaded from any working directory without file-path errors.
-    """
+    """Build a self-contained MJCF XML string combining Kinova Gen3 + peg + hole."""
     gen3_xml_path = (kinova_dir / "gen3.xml").resolve()
     if not gen3_xml_path.exists():
         raise FileNotFoundError(
             f"Kinova Gen3 XML not found at {gen3_xml_path}. "
-            "Run `python3 setup_mujoco.py` first."
+            "Run `python scripts/setup_mujoco.py` first."
         )
 
     tree = ET.parse(gen3_xml_path)
@@ -156,7 +168,7 @@ def build_peg_in_hole_xml(
     option.set("cone", "elliptic")
     option.set("impratio", "10")
 
-    # 2. Patch joint regularization & actuator bounds (fixes Joint 1 & low-inertia instability)
+    # 2. Patch joint regularization & actuator bounds
     for jnt in root.iter("joint"):
         jname = jnt.get("name", "")
         if jname.startswith("joint_"):
@@ -170,22 +182,28 @@ def build_peg_in_hole_xml(
         for act in list(actuator_elem):
             jname = act.get("joint", "")
             if jname in ("joint_1", "joint_3", "joint_5", "joint_7"):
-                # Ensure continuous joints have explicit wide ctrlrange so both
-                # viewer sliders and position controllers move Joint 1 smoothly.
                 act.set("ctrllimited", "true")
                 act.set("ctrlrange", "-6.283185 6.283185")
 
-    # 3. Ensure base_link <-> shoulder_link contact exclusion (prevents Joint 1 pinning)
+    # 3. Collect existing robot body names to exclude peg <-> wrist self-contacts
+    existing_bodies = {b.get("name", "") for b in root.iter("body")}
     contact_elem = root.find("contact")
     if contact_elem is None:
         contact_elem = ET.SubElement(root, "contact")
-    ET.SubElement(
-        contact_elem,
-        "exclude",
-        {"body1": "base_link", "body2": "shoulder_link"},
-    )
 
-    # 4. Add visual assets (floor checker & materials)
+    for b1, b2 in [
+        ("base_link", "shoulder_link"),
+        ("peg_body", "bracelet_link"),
+        ("peg_body", "spherical_wrist_2_link"),
+        ("peg_body", "spherical_wrist_1_link"),
+        ("peg_body", "forearm_link"),
+    ]:
+        if (b1 == "peg_body" or b1 in existing_bodies) and (
+            b2 == "peg_body" or b2 in existing_bodies
+        ):
+            ET.SubElement(contact_elem, "exclude", {"body1": b1, "body2": b2})
+
+    # 4. Add visual assets
     asset = root.find("asset")
     if asset is None:
         asset = ET.SubElement(root, "asset")
@@ -223,9 +241,14 @@ def build_peg_in_hole_xml(
         {"name": "table_mat", "rgba": "0.62 0.56 0.48 1.0", "specular": "0.1"},
     )
 
-    # 5. Attach peg + peg_tip site + wrist_cam to the terminal Kinova link
+    # 5. Attach peg + peg_tip site + wrist_cam along the actual outward flange axis
     tool_body = _find_tool_body(root)
-    peg_mount = ET.SubElement(tool_body, "body", {"name": "peg_body", "pos": "0 0 0.06"})
+    flange_pos, flange_quat, z_sign = _detect_flange_transform(tool_body)
+    peg_attrs: Dict[str, str] = {"name": "peg_body", "pos": flange_pos}
+    if flange_quat is not None:
+        peg_attrs["quat"] = flange_quat
+    peg_mount = ET.SubElement(tool_body, "body", peg_attrs)
+
     ET.SubElement(
         peg_mount,
         "geom",
@@ -233,7 +256,7 @@ def build_peg_in_hole_xml(
             "name": "peg_geom",
             "type": "cylinder",
             "size": f"{peg_radius:.5f} {peg_length / 2.0:.5f}",
-            "pos": f"0 0 {peg_length / 2.0:.5f}",
+            "pos": f"0 0 {z_sign * peg_length / 2.0:.5f}",
             "material": "peg_mat",
             "mass": "0.12",
             "friction": "0.4 0.005 0.0001",
@@ -247,19 +270,18 @@ def build_peg_in_hole_xml(
         "site",
         {
             "name": "peg_tip",
-            "pos": f"0 0 {peg_length:.5f}",
+            "pos": f"0 0 {z_sign * peg_length:.5f}",
             "size": "0.004",
             "rgba": "1 0.9 0 0.8",
         },
     )
-    # Wrist-mounted webcam angled toward the peg tip and hole entry
     ET.SubElement(
         tool_body,
         "camera",
         {
             "name": "wrist_cam",
-            "pos": "0.06 0.0 0.02",
-            "xyaxes": "0 1 0 -0.25 0 0.97",
+            "pos": f"0.06 0.0 {z_sign * 0.02:.4f}",
+            "xyaxes": "0 1 0 -0.25 0 0.97" if z_sign < 0 else "0 1 0 0.25 0 -0.97",
             "fovy": "58",
         },
     )
@@ -268,7 +290,6 @@ def build_peg_in_hole_xml(
     worldbody = root.find("worldbody")
     assert worldbody is not None
 
-    # Main + fill lights (randomized per episode for visual robustness)
     ET.SubElement(
         worldbody,
         "light",
@@ -292,7 +313,6 @@ def build_peg_in_hole_xml(
         },
     )
 
-    # Floor plane slightly below z=0 so base_link sits cleanly on mount
     ET.SubElement(
         worldbody,
         "geom",
@@ -306,7 +326,6 @@ def build_peg_in_hole_xml(
         },
     )
 
-    # Task table in front of the robot (kept clear of robot base_link at origin)
     ET.SubElement(
         worldbody,
         "geom",
@@ -320,7 +339,6 @@ def build_peg_in_hole_xml(
         },
     )
 
-    # Hole assembly built from 8 primitive wall segments (fast, exact cylinder-like clearance)
     hx, hy, hz = nominal_hole_pos
     hole_body = ET.SubElement(
         worldbody,
@@ -331,7 +349,6 @@ def build_peg_in_hole_xml(
     wall_thickness = 0.025
     wall_half_h = hole_depth / 2.0
     n_sides = 8
-    # Side length for circumscribed regular octagon around inner_r
     half_seg_len = inner_r * np.tan(np.pi / n_sides) + wall_thickness * 0.45
 
     for i in range(n_sides):
@@ -356,7 +373,6 @@ def build_peg_in_hole_xml(
             },
         )
 
-    # Bottom plate of the hole
     ET.SubElement(
         hole_body,
         "geom",
@@ -390,7 +406,6 @@ def build_peg_in_hole_xml(
         },
     )
 
-    # 7. Add force/torque sensor at peg_tip for contact/jamming detection
     sensor_elem = root.find("sensor")
     if sensor_elem is None:
         sensor_elem = ET.SubElement(root, "sensor")
@@ -414,7 +429,13 @@ class KinovaPegInHoleEnv(RobotBackend):
         nullspace_gain: float = 0.5,
     ) -> None:
         if kinova_dir is None:
-            kinova_dir = Path(__file__).resolve().parent / "assets" / "mujoco_menagerie" / "kinova_gen3"
+            # Support both repo-root/assets and local-dir/assets layouts
+            here = Path(__file__).resolve()
+            candidates = [
+                here.parents[2] / "assets" / "mujoco_menagerie" / "kinova_gen3",
+                here.parent / "assets" / "mujoco_menagerie" / "kinova_gen3",
+            ]
+            kinova_dir = next((p for p in candidates if (p / "gen3.xml").exists()), candidates[0])
         self.kinova_dir = Path(kinova_dir)
         self.config = config or EpisodeConfig()
         self.peg_radius = peg_radius
@@ -426,12 +447,13 @@ class KinovaPegInHoleEnv(RobotBackend):
         self._nominal_hole_pos = np.array([0.48, 0.0, 0.05], dtype=np.float64)
         self._rng = np.random.default_rng(self.config.seed)
         self._renderer: Any = None
+        self.xml_str: str = ""
 
         self._build_model(clearance_m=self.config.domain_randomization.clearance_mm_range[0] / 1000.0)
         self._init_episode_buffers()
 
     def _build_model(self, clearance_m: float) -> None:
-        xml_str = build_peg_in_hole_xml(
+        self.xml_str = build_peg_in_hole_xml(
             kinova_dir=self.kinova_dir,
             peg_radius=self.peg_radius,
             peg_length=self.peg_length,
@@ -439,10 +461,9 @@ class KinovaPegInHoleEnv(RobotBackend):
             hole_depth=self.hole_depth,
             nominal_hole_pos=tuple(self._nominal_hole_pos),  # type: ignore[arg-type]
         )
-        self.model = mujoco.MjModel.from_xml_string(xml_str)
+        self.model = mujoco.MjModel.from_xml_string(self.xml_str)
         self.data = mujoco.MjData(self.model)
 
-        # Resolve exact indices by name (never assume [:7]!)
         self.joint_names = [f"joint_{i}" for i in range(1, NUM_ARM_JOINTS + 1)]
         self.joint_ids = np.array(
             [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in self.joint_names],
@@ -454,7 +475,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         self.qpos_ids = np.array([self.model.jnt_qposadr[j] for j in self.joint_ids], dtype=np.int32)
         self.dof_ids = np.array([self.model.jnt_dofadr[j] for j in self.joint_ids], dtype=np.int32)
 
-        # Map each joint_1..joint_7 to its corresponding actuator index
         self.actuator_ids = np.full(NUM_ARM_JOINTS, -1, dtype=np.int32)
         for act_id in range(self.model.nu):
             trnid = self.model.actuator_trnid[act_id, 0]
@@ -464,7 +484,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         if np.any(self.actuator_ids < 0):
             raise RuntimeError(f"Missing actuator mapping for joints: {self.actuator_ids}")
 
-        # Site, body, geom, and sensor IDs
         self.peg_tip_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_tip")
         self.hole_entry_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "hole_entry")
         self.hole_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hole_body")
@@ -481,7 +500,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         self.torque_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "peg_torque")
         self.key_light_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_LIGHT, "key_light")
 
-        # Scratch arrays for Jacobian
         self._jacp = np.zeros((3, self.model.nv), dtype=np.float64)
         self._jacr = np.zeros((3, self.model.nv), dtype=np.float64)
 
@@ -495,6 +513,18 @@ class KinovaPegInHoleEnv(RobotBackend):
         self._q_target = DEFAULT_HOME_QPOS.copy()
         self.episode_params: Dict[str, Any] = {}
 
+    def get_active_contacts(self) -> List[Tuple[str, str, float]]:
+        """Return list of (geom1_name, geom2_name, force_N) for debugging."""
+        contacts: List[Tuple[str, str, float]] = []
+        c_force = np.zeros(6, dtype=np.float64)
+        for i in range(int(self.data.ncon)):
+            con = self.data.contact[i]
+            g1 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, int(con.geom1)) or f"geom_{con.geom1}"
+            g2 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, int(con.geom2)) or f"geom_{con.geom2}"
+            mujoco.mj_contactForce(self.model, self.data, i, c_force)
+            contacts.append((g1, g2, float(np.linalg.norm(c_force[:3]))))
+        return contacts
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -506,7 +536,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         self._rng = np.random.default_rng(active_seed)
         dr = self.config.domain_randomization
 
-        # Rebuild model only if clearance is randomized across a non-degenerate range
         c_lo, c_hi = dr.clearance_mm_range
         clearance_m = (
             float(self._rng.uniform(c_lo, c_hi)) / 1000.0 if (dr.enabled and c_hi > c_lo) else c_lo / 1000.0
@@ -517,7 +546,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         mujoco.mj_resetData(self.model, self.data)
         self._init_episode_buffers()
 
-        # 1. Randomize hole pose on the work table
         hole_pos = self._nominal_hole_pos.copy()
         hole_yaw = 0.0
         if dr.enabled:
@@ -530,7 +558,6 @@ class KinovaPegInHoleEnv(RobotBackend):
             [np.cos(hole_yaw / 2.0), 0.0, 0.0, np.sin(hole_yaw / 2.0)], dtype=np.float64
         )
 
-        # 2. Randomize peg/hole contact friction
         friction = 0.4
         if dr.enabled:
             friction = float(self._rng.uniform(dr.friction_range[0], dr.friction_range[1]))
@@ -539,7 +566,6 @@ class KinovaPegInHoleEnv(RobotBackend):
             if gid >= 0:
                 self.model.geom_friction[gid, 0] = friction
 
-        # 3. Randomize key light position and intensity for wrist_cam robustness
         light_pos = np.array([0.6, -0.5, 1.4], dtype=np.float64)
         light_diffuse = np.array([0.85, 0.85, 0.82], dtype=np.float64)
         if dr.enabled and dr.randomize_lighting and self.key_light_id >= 0:
@@ -551,7 +577,6 @@ class KinovaPegInHoleEnv(RobotBackend):
             self.model.light_pos[self.key_light_id] = light_pos
             self.model.light_diffuse[self.key_light_id] = light_diffuse
 
-        # 4. Initialize arm near home and move peg tip to randomized start above hole
         self.data.qpos[self.qpos_ids] = DEFAULT_HOME_QPOS.copy()
         self.data.ctrl[self.actuator_ids] = DEFAULT_HOME_QPOS.copy()
         mujoco.mj_forward(self.model, self.data)
@@ -570,10 +595,8 @@ class KinovaPegInHoleEnv(RobotBackend):
                 self._rng.uniform(-dr.peg_start_xy_offset_m[1], dr.peg_start_xy_offset_m[1])
             )
 
-        # Solve a few damped IK iterations to place the peg at the randomized start
         self._settle_to_start_position(start_target)
 
-        # 5. Latency queue initialization
         lat_lo, lat_hi = dr.latency_steps_range
         latency_steps = (
             int(self._rng.integers(lat_lo, lat_hi + 1))
@@ -596,7 +619,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         return self.get_observation()
 
     def _settle_to_start_position(self, target_pos: np.ndarray, iters: int = 40) -> None:
-        """Use kinematic DLS IK to initialize the peg tip cleanly at start_target."""
         for _ in range(iters):
             mujoco.mj_forward(self.model, self.data)
             cur_pos = self.data.site_xpos[self.peg_tip_site_id].copy()
@@ -619,7 +641,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         mujoco.mj_forward(self.model, self.data)
 
     def _apply_control_constraints(self, command: CartesianCommand) -> np.ndarray:
-        """Convert command to bounded, filtered, delayed 6-DoF twist."""
         limits = self.config.control_limits
         dt = limits.control_dt
 
@@ -630,25 +651,21 @@ class KinovaPegInHoleEnv(RobotBackend):
         else:
             raw_twist = command.as_vector().copy()
 
-        # Deadband
         if limits.deadband_linear > 0.0 and np.linalg.norm(raw_twist[:3]) < limits.deadband_linear:
             raw_twist[:3] = 0.0
         if limits.deadband_angular > 0.0 and np.linalg.norm(raw_twist[3:]) < limits.deadband_angular:
             raw_twist[3:] = 0.0
 
-        # Command latency buffer
         if len(self._cmd_queue) > 0:
             self._cmd_queue.append(raw_twist)
             delayed_twist = self._cmd_queue.popleft()
         else:
             delayed_twist = raw_twist
 
-        # Exponential low-pass filter
         alpha = float(np.clip(limits.lpf_alpha, 0.01, 1.0))
         self._filtered_twist = alpha * delayed_twist + (1.0 - alpha) * self._filtered_twist
         twist = self._filtered_twist.copy()
 
-        # Velocity norm bounds
         lin_norm = float(np.linalg.norm(twist[:3]))
         if lin_norm > limits.max_linear_vel:
             twist[:3] *= limits.max_linear_vel / lin_norm
@@ -656,7 +673,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         if ang_norm > limits.max_angular_vel:
             twist[3:] *= limits.max_angular_vel / ang_norm
 
-        # Acceleration bounds
         d_lin = twist[:3] - self._prev_twist[:3]
         max_d_lin = limits.max_linear_acc * dt
         d_lin_norm = float(np.linalg.norm(d_lin))
@@ -669,7 +685,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         if d_ang_norm > max_d_ang:
             twist[3:] = self._prev_twist[3:] + d_ang * (max_d_ang / d_ang_norm)
 
-        # Workspace soft-wall clamp (prevent pushing further outside workspace box)
         ee_pos = self.data.site_xpos[self.peg_tip_site_id]
         ws_min = np.asarray(limits.workspace_min, dtype=np.float64)
         ws_max = np.asarray(limits.workspace_max, dtype=np.float64)
@@ -683,12 +698,11 @@ class KinovaPegInHoleEnv(RobotBackend):
         return twist
 
     def _solve_dls_ik_velocity(self, twist: np.ndarray) -> np.ndarray:
-        """Map 6-DoF Cartesian twist to 7-DoF joint velocities via DLS + nullspace."""
         mujoco.mj_jacSite(self.model, self.data, self._jacp, self._jacr, self.peg_tip_site_id)
-        J = np.vstack([self._jacp[:, self.dof_ids], self._jacr[:, self.dof_ids]])  # (6, 7)
+        J = np.vstack([self._jacp[:, self.dof_ids], self._jacr[:, self.dof_ids]])
 
         jjt = J @ J.T + (self.dls_damping**2) * np.eye(6)
-        J_pinv = J.T @ np.linalg.inv(jjt)  # (7, 6)
+        J_pinv = J.T @ np.linalg.inv(jjt)
 
         q_cur = self.data.qpos[self.qpos_ids]
         null_proj = np.eye(NUM_ARM_JOINTS) - J_pinv @ J
@@ -731,24 +745,25 @@ class KinovaPegInHoleEnv(RobotBackend):
         )
 
     def _read_contact_state(self) -> ContactState:
-        num_contacts = int(self.data.ncon)
+        num_peg_contacts = 0
         peg_hole_contact = False
         table_collision = False
-        total_force = 0.0
+        peg_contact_force = 0.0
         c_force = np.zeros(6, dtype=np.float64)
 
-        for i in range(num_contacts):
+        for i in range(int(self.data.ncon)):
             con = self.data.contact[i]
             g1, g2 = int(con.geom1), int(con.geom2)
             pair = {g1, g2}
-            if self.peg_geom_id in pair and (g1 in self.hole_geom_ids or g2 in self.hole_geom_ids):
-                peg_hole_contact = True
-            if self.table_geom_id in pair and self.peg_geom_id in pair:
-                table_collision = True
-            mujoco.mj_contactForce(self.model, self.data, i, c_force)
-            total_force += float(np.linalg.norm(c_force[:3]))
+            if self.peg_geom_id in pair:
+                num_peg_contacts += 1
+                mujoco.mj_contactForce(self.model, self.data, i, c_force)
+                peg_contact_force += float(np.linalg.norm(c_force[:3]))
+                if g1 in self.hole_geom_ids or g2 in self.hole_geom_ids:
+                    peg_hole_contact = True
+                if self.table_geom_id in pair:
+                    table_collision = True
 
-        # Read wrist/peg tip wrench sensor
         wrench = np.zeros(6, dtype=np.float64)
         if self.force_sensor_id >= 0:
             adr = self.model.sensor_adr[self.force_sensor_id]
@@ -759,17 +774,17 @@ class KinovaPegInHoleEnv(RobotBackend):
 
         crit = self.config.success_criteria
         ee_speed = float(np.linalg.norm(self._prev_twist[:3]))
-        if peg_hole_contact and total_force >= crit.jam_force_threshold_n and ee_speed < 0.005:
+        if peg_hole_contact and peg_contact_force >= crit.jam_force_threshold_n and ee_speed < 0.005:
             self._jam_steps += 1
         else:
             self._jam_steps = max(0, self._jam_steps - 1)
 
         return ContactState(
-            in_contact=num_contacts > 0,
-            num_contacts=num_contacts,
+            in_contact=num_peg_contacts > 0,
+            num_contacts=num_peg_contacts,
             peg_hole_contact=peg_hole_contact,
             table_collision=table_collision,
-            total_contact_force_n=total_force,
+            total_contact_force_n=peg_contact_force,
             wrench_ee=wrench,
             is_jammed=self._jam_steps >= crit.jam_steps_threshold,
         )
@@ -795,7 +810,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         return q_out, p_out
 
     def render_wrist_camera(self) -> np.ndarray:
-        """Render RGB frame from the wrist-mounted simulated webcam."""
         sr = self.config.sensor_realism
         if self._renderer is None:
             self._renderer = mujoco.Renderer(
@@ -816,7 +830,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         ee_quat = np.zeros(4, dtype=np.float64)
         mujoco.mju_mat2Quat(ee_quat, ee_xmat.flatten())
 
-        # End-effector spatial velocity via Jacobian * qvel
         mujoco.mj_jacSite(self.model, self.data, self._jacp, self._jacr, self.peg_tip_site_id)
         ee_v_lin = self._jacp[:, self.dof_ids] @ raw_qvel
         ee_v_ang = self._jacr[:, self.dof_ids] @ raw_qvel
@@ -826,7 +839,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         hole_quat = np.zeros(4, dtype=np.float64)
         mujoco.mju_mat2Quat(hole_quat, hole_xmat.flatten())
 
-        # Peg tip expressed in hole_entry frame: +z is above hole, negative z is inserted
         rel_hole = hole_xmat.T @ (raw_ee_pos - hole_pos)
         peg_to_hole_local = np.array([rel_hole[0], rel_hole[1], -rel_hole[2]], dtype=np.float64)
 
@@ -861,7 +873,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         lateral_err = float(np.linalg.norm(obs.peg_to_hole_local[:2]))
         insertion_depth = float(obs.peg_to_hole_local[2])
 
-        # Tilt angle between peg Z-axis and downward hole axis (-Z in hole frame)
         peg_z = _quat_to_rotmat(obs.peg_quat)[:, 2]
         hole_z = _quat_to_rotmat(obs.hole_quat)[:, 2]
         cos_tilt = float(np.clip(abs(np.dot(peg_z, hole_z)), -1.0, 1.0))
@@ -874,7 +885,6 @@ class KinovaPegInHoleEnv(RobotBackend):
             "hold_steps": self._hold_steps,
         }
 
-        # Success check
         if (
             insertion_depth >= crit.insertion_depth_m
             and lateral_err <= crit.max_lateral_error_m
@@ -886,7 +896,6 @@ class KinovaPegInHoleEnv(RobotBackend):
         else:
             self._hold_steps = 0
 
-        # Failure checks
         if obs.contact.total_contact_force_n > crit.max_contact_force_n:
             return EpisodeStatus.FAILURE_COLLISION, info
         if obs.contact.is_jammed:
