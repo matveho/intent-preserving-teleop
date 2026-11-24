@@ -83,3 +83,8 @@ config.local.*
 *.local.yaml
 *.local.yml
 *.local.json
+
+# ROS
+build
+install
+log

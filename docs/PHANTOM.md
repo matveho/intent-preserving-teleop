@@ -1,4 +1,7 @@
 # PHANToM Omni Setup (Linux, ROS 2, and SAW)
+> [!WARNING]
+> Install jazzy, not humble. Install libgraphviz-dev and graphviz.
+
 
 This guide describes how to connect the original **SensAble PHANToM Omni (FireWire / IEEE 1394)** to Linux, install the vendor driver and OpenHaptics SDK, build the JHU cisst/SAW integration, and read the device through ROS 2.
 
