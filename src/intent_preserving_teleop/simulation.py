@@ -429,11 +429,12 @@ class KinovaPegInHoleEnv(RobotBackend):
         nullspace_gain: float = 0.5,
     ) -> None:
         if kinova_dir is None:
-            # Support both repo-root/assets and local-dir/assets layouts
+            # Prefer the shared repository asset location. This is independent
+            # of the shell's working directory (scripts/, repo root, etc.).
             here = Path(__file__).resolve()
             candidates = [
                 here.parents[2] / "assets" / "mujoco_menagerie" / "kinova_gen3",
-                here.parent / "assets" / "mujoco_menagerie" / "kinova_gen3",
+                here.parents[2] / "scripts" / "assets" / "mujoco_menagerie" / "kinova_gen3",
             ]
             kinova_dir = next((p for p in candidates if (p / "gen3.xml").exists()), candidates[0])
         self.kinova_dir = Path(kinova_dir)
