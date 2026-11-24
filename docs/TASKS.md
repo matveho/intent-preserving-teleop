@@ -2,20 +2,12 @@
 
 **Deadline: Dec 6 [Sunday]** · Scale: `S` small · `M` medium · `L` large · `XL` integration-heavy
 
-## 0. Agree on Interfaces - Everyone - Nov 22 [Sunday]
-
-- [ ]  **Freeze the shared robot and data schema** `M`:
-
-  - bounded 6-DoF Cartesian twist or pose increment
-  - observation fields, units, frames, control rate, timestamps, and success/failure criteria.
-  - Simulation, logging, learning, and Gen3 must use the same contract so switching hardware only replaces the backend.
-
 ## 1. Simulation - Dominik
 
-- [ ]  **Build MuJoCo peg-in-hole environment** `L` — **Nov 23 [Monday]**:
+- [x]  **Build MuJoCo peg-in-hole environment** `L` — **Nov 23 [Monday]**:
 
   - use a robot model compatible with 6-DoF Cartesian control, randomized initial peg/target configurations, deterministic reset from a supplied seed, and success/failure detection.
-  - Expose robot pose, joint state, peg/hole state, and contact state through the agreed schema. S
+  - Expose robot pose, joint state, peg/hole state, and contact state through the agreed schema.
   - Support repeated reset → command → step → success/failure trials without manual intervention.
   - **Handoff to Graeme.**
 - [ ]  **Match simulation control constraints to physical deployment** `M` — **Nov 24 [Tuesday]**:
