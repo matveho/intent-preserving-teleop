@@ -1,4 +1,18 @@
 # PHANToM Omni Setup (Linux, ROS 2, and SAW)
+
+> [!IMPORTANT]
+> **Before launching the PHANToM, run this from inside your repository clone in the SAME terminal used to launch the driver. Repeat in each new terminal.**
+>
+> ```bash
+> export PHANTOM_CONFIG_FILES="$(git rev-parse --show-toplevel)/configs/phantom/10429000026"
+> ```
+>
+> This selects the checked-in configuration for **serial `10429000026`**, named **`arm`**, without sudo. Use it only with that device. After sourcing Jazzy and your built ROS workspace, launch with:
+>
+> ```bash
+> ros2 run sensable_phantom sensable_phantom -j "$PHANTOM_CONFIG_FILES/sawSensablePhantom.json"
+> ```
+
 > [!WARNING]
 > Use Ubuntu 24.04 and ROS 2 Jazzy. Apply the compatibility fix in step 8 before building the current SAW sources.
 
