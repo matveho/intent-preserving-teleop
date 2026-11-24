@@ -142,7 +142,7 @@ def inspect_gen3_model(kinova_dir: Path) -> None:
             f"ctrllimited={str(clim):5s} ctrlrange=[{crange[0]:6.2f}, {crange[1]:6.2f}]{flag}"
         )
 
-    print("\n[verify] Setup complete. Run `python3 verify_sim.py` next to test Joint 1-7 and Cartesian IK.")
+    print("\n[verify] Setup complete. Run `python3 scripts/run_teleop.py` with the ROS PHANToM node active.")
 
 
 def main() -> None:
