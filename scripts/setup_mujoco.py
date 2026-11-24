@@ -150,7 +150,10 @@ def main() -> None:
     parser.add_argument(
         "--assets-dir",
         type=Path,
-        default=Path(__file__).resolve().parent / "assets",
+        # Keep downloaded models in the shared repository, not scripts/assets.
+        # This makes setup independent of the shell's current directory and
+        # matches KinovaPegInHoleEnv's default model search path.
+        default=Path(__file__).resolve().parents[1] / "assets",
         help="Directory where mujoco_menagerie/kinova_gen3 will be stored.",
     )
     parser.add_argument(
