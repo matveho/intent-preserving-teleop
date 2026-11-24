@@ -1,0 +1,2 @@
+source /home/mokoneshnikov/environments/sensable/activate.sh
+/home/mokoneshnikov/environments/sensable/build/phantom-local/bin/sawSensablePhantomQtExample
