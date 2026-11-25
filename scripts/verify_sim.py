@@ -218,6 +218,39 @@ def launch_viewer(env: KinovaPegInHoleEnv, seed: int = 0) -> None:
                 time.sleep(dt_sleep)
 
 
+def launch_insertion_demo(env: KinovaPegInHoleEnv, seed: int = 0) -> None:
+    """Show the same scripted alignment and insertion used by the trial check."""
+    import mujoco.viewer  # type: ignore
+
+    obs = env.reset(seed=seed, hole="top")
+    finished = False
+    print("\n[viewer] Showing seeded scripted peg insertion.")
+    print("[viewer] Close the window to stop; contact points/forces are toggled with C/F.")
+    with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+        while viewer.is_running():
+            t0 = time.perf_counter()
+            if not finished:
+                err = obs.hole_pos[:2] - obs.peg_pos[:2]
+                if np.linalg.norm(err) > 0.004:
+                    linear = np.array([2.0 * err[0], 2.0 * err[1], 0.0])
+                else:
+                    linear = np.array([1.5 * err[0], 1.5 * err[1], -0.05])
+                result = env.step(CartesianCommand(linear=linear, angular=np.zeros(3)))
+                obs = result.observation
+                if result.done:
+                    finished = True
+                    print(
+                        f"[viewer] Trial ended: {result.status.value}; "
+                        f"depth={obs.peg_to_hole_local[2] * 1000:.1f} mm, "
+                        f"lateral={np.linalg.norm(obs.peg_to_hole_local[:2]) * 1000:.2f} mm"
+                    )
+                    # Leave the final successful pose visible until the viewer closes.
+            viewer.sync()
+            dt_sleep = env.config.control_limits.control_dt - (time.perf_counter() - t0)
+            if dt_sleep > 0:
+                time.sleep(dt_sleep)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify MuJoCo Kinova Gen3 peg-in-hole setup.")
     parser.add_argument(
@@ -228,6 +261,7 @@ def main() -> None:
     )
     parser.add_argument("--viewer", action="store_true", help="Launch viewer after running tests.")
     parser.add_argument("--viewer-only", action="store_true", help="Skip tests and open viewer immediately.")
+    parser.add_argument("--viewer-insertion", action="store_true", help="Visually replay a scripted insertion.")
     parser.add_argument("--test-camera", action="store_true", help="Also test wrist_cam rendering.")
     parser.add_argument("--seed", type=int, default=0, help="Episode seed for --viewer / --viewer-only.")
     args = parser.parse_args()
@@ -236,6 +270,9 @@ def main() -> None:
     try:
         if args.viewer_only:
             launch_viewer(env, seed=args.seed)
+            return
+        if args.viewer_insertion:
+            launch_insertion_demo(env, seed=args.seed)
             return
 
         ok1 = test_individual_joints(env)
