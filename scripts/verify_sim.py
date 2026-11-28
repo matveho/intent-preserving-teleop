@@ -7,6 +7,7 @@ Run after ``python3 setup_mujoco.py``:
 Usage (from repo root or scripts/):
     python verify_sim.py --viewer-only        # open MuJoCo viewer immediately
     python verify_sim.py --viewer             # run all tests, then open viewer even on failure
+    python verify_sim.py --viewer-insertion --wrist-camera  # show insertion from bracelet wrist camera
     python verify_sim.py --test-camera        # include wrist_cam rendering test
 
 Checks performed
@@ -218,7 +219,9 @@ def launch_viewer(env: KinovaPegInHoleEnv, seed: int = 0) -> None:
                 time.sleep(dt_sleep)
 
 
-def launch_insertion_demo(env: KinovaPegInHoleEnv, seed: int = 0) -> None:
+def launch_insertion_demo(
+    env: KinovaPegInHoleEnv, seed: int = 0, wrist_camera: bool = False
+) -> None:
     """Show the same scripted alignment and insertion used by the trial check."""
     import mujoco.viewer  # type: ignore
 
@@ -227,6 +230,17 @@ def launch_insertion_demo(env: KinovaPegInHoleEnv, seed: int = 0) -> None:
     print("\n[viewer] Showing seeded scripted peg insertion.")
     print("[viewer] Close the window to stop; contact points/forces are toggled with C/F.")
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+        if wrist_camera:
+            # The Menagerie XML already mounts this camera on bracelet_link.
+            # Use it directly so its authored pose looks forward past the gripper.
+            camera_id = mujoco.mj_name2id(
+                env.model, mujoco.mjtObj.mjOBJ_CAMERA, "wrist"
+            )
+            if camera_id < 0:
+                raise ValueError("The simulation model does not contain the bracelet_link 'wrist' camera.")
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+            viewer.cam.fixedcamid = camera_id
+            print("[viewer] Using the bracelet_link wrist camera.")
         while viewer.is_running():
             t0 = time.perf_counter()
             if not finished:
@@ -262,9 +276,17 @@ def main() -> None:
     parser.add_argument("--viewer", action="store_true", help="Launch viewer after running tests.")
     parser.add_argument("--viewer-only", action="store_true", help="Skip tests and open viewer immediately.")
     parser.add_argument("--viewer-insertion", action="store_true", help="Visually replay a scripted insertion.")
+    parser.add_argument(
+        "--wrist-camera",
+        action="store_true",
+        help="Show the insertion demo through the bracelet_link wrist camera (requires --viewer-insertion).",
+    )
     parser.add_argument("--test-camera", action="store_true", help="Also test wrist_cam rendering.")
     parser.add_argument("--seed", type=int, default=0, help="Episode seed for --viewer / --viewer-only.")
     args = parser.parse_args()
+
+    if args.wrist_camera and not args.viewer_insertion:
+        parser.error("--wrist-camera requires --viewer-insertion.")
 
     env = KinovaPegInHoleEnv(kinova_dir=args.kinova_dir)
     try:
@@ -272,7 +294,7 @@ def main() -> None:
             launch_viewer(env, seed=args.seed)
             return
         if args.viewer_insertion:
-            launch_insertion_demo(env, seed=args.seed)
+            launch_insertion_demo(env, seed=args.seed, wrist_camera=args.wrist_camera)
             return
 
         ok1 = test_individual_joints(env)
