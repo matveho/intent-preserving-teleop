@@ -97,6 +97,9 @@ class DomainRandomizationConfig:
     """Per-episode randomization bounds (logged per episode for reproducibility)."""
 
     enabled: bool = True
+    # Select top entry, horizontal entry through the vertical wall, or sample
+    # either layout per seeded episode.
+    insertion_layout: str = "top"  # "top" | "horizontal" | "random"
     hole_xy_range_m: Tuple[float, float] = (0.04, 0.04)     # +/- half-range around nominal
     hole_yaw_range_rad: float = 0.25                        # +/- rad
     peg_start_xy_offset_m: Tuple[float, float] = (0.06, 0.06)

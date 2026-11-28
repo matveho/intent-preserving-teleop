@@ -1,0 +1,10 @@
+{
+  "version": "heldout-v1",
+  "description": "Fixed evaluation seeds reserved from demonstration collection. Use reset(seed=...) with hole=top.",
+  "seeds": [
+    1701, 1702, 1703, 1704, 1705,
+    1706, 1707, 1708, 1709, 1710,
+    1711, 1712, 1713, 1714, 1715,
+    1716, 1717, 1718, 1719, 1720
+  ]
+}

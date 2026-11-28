@@ -58,6 +58,7 @@ try:
         RobotBackend,
         StepResult,
     )
+    from intent_preserving_teleop.domain_randomization import resolve_insertion_layout
 except ImportError:
     from schema import (  # type: ignore
         CartesianCommand,
@@ -70,6 +71,7 @@ except ImportError:
         RobotBackend,
         StepResult,
     )
+    from domain_randomization import resolve_insertion_layout  # type: ignore
 
 # Conservative Kinova Gen3 7-DoF home posture (arm forward, tool pointing down)
 DEFAULT_HOME_QPOS = np.array(
@@ -554,17 +556,30 @@ class KinovaPegInHoleEnv(RobotBackend):
         hole_depth: float = 0.045,
         dls_damping: float = 0.04,
         nullspace_gain: float = 0.5,
-        hole: str = "top",
+        hole: Optional[str] = None,
         enable_second_hole: bool = False,
         second_hole_layout: str = "table",
     ) -> None:
+        self.config = config or EpisodeConfig()
+        configured_layout = self.config.domain_randomization.insertion_layout
+        if configured_layout not in ("top", "horizontal", "random"):
+            raise ValueError(
+                "domain_randomization.insertion_layout must be 'top', "
+                f"'horizontal', or 'random'; got {configured_layout!r}"
+            )
+        requested_layout = hole if hole in ("top", "horizontal", "random") else configured_layout
+        # Horizontal/random layouts need the existing vertical-wall fixture.
+        if requested_layout in ("horizontal", "random"):
+            enable_second_hole = True
+            if second_hole_layout == "table":
+                second_hole_layout = "wall"
         if second_hole_layout not in SECOND_HOLE_LAYOUTS:
             raise ValueError(
                 f"second_hole_layout must be one of {tuple(SECOND_HOLE_LAYOUTS)}, "
                 f"got {second_hole_layout!r}"
             )
-        valid_holes = HOLE_KEYS + ("random",) if enable_second_hole else ("top",)
-        if hole not in valid_holes:
+        valid_holes = HOLE_KEYS + ("horizontal", "random") if enable_second_hole else ("top",)
+        if hole is not None and hole not in valid_holes:
             raise ValueError(
                 f"hole must be one of {valid_holes}, got {hole!r} "
                 f"(enable_second_hole={enable_second_hole})"
@@ -582,15 +597,14 @@ class KinovaPegInHoleEnv(RobotBackend):
             ]
             kinova_dir = next((p for p in candidates if (p / "gen3.xml").exists()), candidates[0])
         self.kinova_dir = Path(kinova_dir)
-        self.config = config or EpisodeConfig()
         self.peg_radius = peg_radius
         self.peg_length = peg_length
         self.hole_depth = hole_depth
         self.dls_damping = dls_damping
         self.nullspace_gain = nullspace_gain
 
-        self._default_hole = hole
-        self.active_hole = "top" if hole == "random" else hole
+        self._default_hole = hole if hole is not None else requested_layout
+        self.active_hole = "top" if self._default_hole in ("random", "horizontal") else self._default_hole
 
         self._nominal_hole_pos = np.array(TOP_HOLE_NOMINAL_POS, dtype=np.float64)
         self._nominal_side_hole_pos = np.array(
@@ -751,13 +765,35 @@ class KinovaPegInHoleEnv(RobotBackend):
         """
         if config is not None:
             self.config = config
+            layout = self.config.domain_randomization.insertion_layout
+            if layout not in ("top", "horizontal", "random"):
+                raise ValueError(
+                    "domain_randomization.insertion_layout must be 'top', "
+                    f"'horizontal', or 'random'; got {layout!r}"
+                )
+            if self.config.domain_randomization.insertion_layout in ("horizontal", "random"):
+                if not self.enable_second_hole or self.second_hole_layout != "wall":
+                    self.enable_second_hole = True
+                    self.second_hole_layout = "wall"
+                    self._nominal_side_hole_pos = np.array(
+                        SECOND_HOLE_LAYOUTS["wall"]["pos"], dtype=np.float64
+                    )
+                    self._build_model(
+                        clearance_m=self.config.domain_randomization.clearance_mm_range[0] / 1000.0
+                    )
         active_seed = self.config.seed if seed is None else seed
         self._rng = np.random.default_rng(active_seed)
         dr = self.config.domain_randomization
 
-        choice = hole if hole is not None else self._default_hole
+        choice = hole if hole is not None else (
+            self.config.domain_randomization.insertion_layout
+            if config is not None
+            else self._default_hole
+        )
+        if choice in ("horizontal", "random") and (hole is None or choice == "horizontal"):
+            choice = resolve_insertion_layout(choice, self._rng)
         available = tuple(self._holes)
-        valid = available + ("random",) if len(available) > 1 else available
+        valid = available + ("horizontal", "random") if len(available) > 1 else available
         if choice not in valid:
             raise ValueError(f"hole must be one of {valid}, got {choice!r}")
         if choice == "random":
@@ -850,6 +886,7 @@ class KinovaPegInHoleEnv(RobotBackend):
         self.episode_params = {
             "seed": active_seed,
             "active_hole": choice,
+            "insertion_layout": "horizontal" if choice == "side" else "top",
             "hole_pos": hole_pos.tolist(),
             "hole_yaw_rad": hole_yaw,
             "start_target_pos": start_target.tolist(),
